@@ -33,5 +33,3 @@ This function handles:
 - Computing rising/fading rates
 - Computing per-band properties
 - Building AllBandsProperties and PerBandProperties
-
-All computed values are printed directly to the terminal when running the program.
