@@ -2,9 +2,9 @@ import json
 
 # Remove entries in 'fp_hists' that do not contain 'magpsf' key
 if __name__ == "__main__":
-    json_file = "candidates/ZTF25acdhetm.json"
+    json_file = "../candidates/ZTF25acdhetm.json"
     with open(json_file, "r") as file:
-        candidate = json.loads(file.read())
+        candidate = json.load(file)
 
     sanitize_fp_hists = []
     for fp in candidate["fp_hists"]:
