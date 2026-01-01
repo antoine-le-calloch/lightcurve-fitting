@@ -89,6 +89,24 @@ struct TimescaleParams {
     fwhm: f64,        // Full Width at Half Maximum (days)
     rise_rate: f64,   // Rise rate (mag/day) from early data
     decay_rate: f64,  // Decay rate (mag/day) from late data
+    gp_dfdt_now: f64,
+    gp_dfdt_next: f64,
+    gp_d2fdt2_now: f64,
+    gp_predicted_mag_1d: f64,
+    gp_predicted_mag_2d: f64,
+    gp_time_to_peak: f64,
+    gp_extrap_slope: f64,
+}
+
+#[derive(Debug, Clone)]
+struct PredictiveFeatures {
+    gp_dfdt_now: f64,
+    gp_dfdt_next: f64,
+    gp_d2fdt2_now: f64,
+    gp_predicted_mag_1d: f64,
+    gp_predicted_mag_2d: f64,
+    gp_time_to_peak: f64,
+    gp_extrap_slope: f64,
 }
 
 fn read_ztf_lightcurve(path: &str) -> Result<HashMap<String, BandData>, Box<dyn std::error::Error>> {
@@ -382,6 +400,34 @@ fn subsample_data(times: &[f64], mags: &[f64], errors: &[f64], max_points: usize
     (times_sub, mags_sub, errors_sub)
 }
 
+fn compute_predictive_features(
+    gp: &GaussianProcess<f64, ConstantMean, SquaredExponentialCorr>,
+    t_last: f64,
+    t0: f64,
+) -> PredictiveFeatures {
+
+    let dt = 1.0;
+    let tq = vec![t_last - dt, t_last, t_last + dt, t_last + 2.0*dt, t_last + 3.0*dt];
+    let xq = Array2::from_shape_fn((tq.len(),1), |(i,_)| tq[i]);
+    let y = gp.predict(&xq).unwrap().column(0).to_vec();
+
+    let f_m1 = y[0];
+    let f_0  = y[1];
+    let f_p1 = y[2];
+    let f_p2 = y[3];
+    let f_p3 = y[4];
+
+    PredictiveFeatures {
+        gp_dfdt_now: (f_0 - f_m1) / dt,
+        gp_dfdt_next: (f_p1 - f_0) / dt,
+        gp_d2fdt2_now: (f_p1 - 2.0*f_0 + f_m1) / (dt*dt),
+        gp_predicted_mag_1d: f_p1,
+        gp_predicted_mag_2d: f_p2,
+        gp_time_to_peak: t0 - t_last,
+        gp_extrap_slope: (f_p3 - f_p2) / dt,
+    }
+}
+
 fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<TimescaleParams>), Box<dyn std::error::Error>> {
     let object_name = input_path
         .split('/')
@@ -445,18 +491,13 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
         .max_by_key(|(_, band_data)| band_data.times.len())
         .map(|(name, _)| name.clone());
     
+    // Fit bands independently if they have enough data (≥5 points)
+    // Bands with fewer points will borrow from the best-fit reference band
+    let min_points_for_independent_fit = 5;
+    
     for (band_name, band_data) in &bands {
-        // Only fit the band with the most observations
-        if let Some(ref fit_band) = band_to_fit {
-            if band_name != fit_band {
-                continue;
-            }
-        } else {
-            break;
-        }
-        
-        // Skip bands with too few points
-        if band_data.times.len() < 4 {
+        // Skip bands with too few points for independent fitting
+        if band_data.times.len() < min_points_for_independent_fit {
             continue;
         }
         
@@ -533,7 +574,10 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
                 };
                 let rise_rate = compute_rise_rate(&times_pred, &pred);
                 let decay_rate = compute_decay_rate(&times_pred, &pred);
-                
+
+                let t_last = *band_data.times.last().unwrap();
+                let predictive = compute_predictive_features(&gp_fit, t_last, t0);
+
                 // Store timescale parameters
                 timescale_params.push(TimescaleParams {
                     object: object_name.to_string(),
@@ -548,6 +592,13 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
                     fwhm,
                     rise_rate,
                     decay_rate,
+                    gp_dfdt_now: predictive.gp_dfdt_now,
+                    gp_dfdt_next: predictive.gp_dfdt_next,
+                    gp_d2fdt2_now: predictive.gp_d2fdt2_now,
+                    gp_predicted_mag_1d: predictive.gp_predicted_mag_1d,
+                    gp_predicted_mag_2d: predictive.gp_predicted_mag_2d,
+                    gp_time_to_peak: predictive.gp_time_to_peak,
+                    gp_extrap_slope: predictive.gp_extrap_slope,
                 });
                 
                 eprintln!("  {} chi2={:.3} (baseline={:.1}), N={}", band_name, chi2_reduced, baseline_chi2, band_data.mags.len());
@@ -618,8 +669,9 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
         let band_data = bands.get(band_name).unwrap();
         let fit_entry = if let Some((_, pred, std, obs_error)) = fits.get(band_name) {
             Some((pred.clone(), std.clone(), false, *obs_error))
-        } else if band_data.times.len() >= 1 {
-            // borrow reference GP with per-band offset if we have at least one point and a ref fit
+        } else if band_data.times.len() >= 1 && band_data.times.len() < 5 {
+            // Only borrow from reference GP if this band has few points (1-4)
+            // Bands with ≥5 points should have gotten their own fit above
             if let Some((ref_gp, ref_pred, ref_std, ref_obs_error)) = ref_fit {
                 // predict reference at this band's times
                 let t_arr = Array1::from_vec(band_data.times.clone());
@@ -935,14 +987,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Save timescale parameters to CSV
     let csv_path = "gp_timescale_parameters.csv";
     if !all_params.is_empty() {
-        let mut csv_content = String::from("object,band,rise_time_days,decay_time_days,t0_days,peak_mag,chi2,baseline_chi2,n_obs,fwhm_days,rise_rate_mag_per_day,decay_rate_mag_per_day\n");
+        let mut csv_content = String::from("object,band,rise_time_days,decay_time_days,t0_days,peak_mag,chi2,baseline_chi2,n_obs,fwhm_days,rise_rate_mag_per_day,decay_rate_mag_per_day,gp_dfdt_now,gp_dfdt_next,gp_d2fdt2_now,gp_predicted_mag_1d,gp_predicted_mag_2d,gp_time_to_peak,gp_extrap_slope\n");
         for param in &all_params {
-            csv_content.push_str(&format!("{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.1},{},{},{},{}\n",
+            csv_content.push_str(&format!("{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.1},{},{},{},{},{},{},{},{},{},{},{}\n",
                 param.object, param.band, param.rise_time, param.decay_time, param.t0,
                 param.peak_mag, param.chi2, param.baseline_chi2, param.n_obs,
                 if param.fwhm.is_nan() { String::from("NaN") } else { format!("{:.3}", param.fwhm) },
                 if param.rise_rate.is_nan() { String::from("NaN") } else { format!("{:.6}", param.rise_rate) },
-                if param.decay_rate.is_nan() { String::from("NaN") } else { format!("{:.6}", param.decay_rate) }
+                if param.decay_rate.is_nan() { String::from("NaN") } else { format!("{:.6}", param.decay_rate) },
+                if param.gp_dfdt_now.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_dfdt_now)}, 
+                if param.gp_dfdt_next.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_dfdt_next)},
+                if param.gp_d2fdt2_now.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_d2fdt2_now)},
+                if param.gp_predicted_mag_1d.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_predicted_mag_1d)},
+                if param.gp_predicted_mag_2d.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_predicted_mag_2d)},
+                if param.gp_time_to_peak.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_time_to_peak)},
+                if param.gp_extrap_slope.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_extrap_slope)}
             ));
         }
         fs::write(csv_path, csv_content)?;

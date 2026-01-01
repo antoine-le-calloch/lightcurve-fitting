@@ -211,29 +211,29 @@ fn compute_fwhm(times: &[f64], mags: &[f64]) -> f64 {
     let peak_mag = mags.iter().cloned().fold(f64::INFINITY, f64::min);
     let half_max_mag = peak_mag + 0.75;  // 0.75 mag fainter = 50% flux
     
-    // Find time before peak where mag crosses half maximum
+    // Find time before peak where mag crosses half maximum (going from faint to bright)
     let mut t_before = f64::NAN;
     for (t, m) in times.iter().zip(mags.iter()) {
-        if m < &half_max_mag {
+        if m >= &half_max_mag {  // Found where it's fainter than half-max
             t_before = *t;
             break;
         }
     }
     
-    // Find time after peak where mag crosses half maximum
+    // Find time after peak where mag crosses half maximum (going from bright to faint)
     let mut t_after = f64::NAN;
     for (t, m) in times.iter().zip(mags.iter()).rev() {
-        if m < &half_max_mag {
+        if m >= &half_max_mag {  // Found where it's fainter than half-max
             t_after = *t;
             break;
         }
     }
     
     if t_before.is_nan() || t_after.is_nan() {
-        return f64::NAN;
+        return (f64::NAN, f64::NAN, f64::NAN);
     }
     
-    t_after - t_before
+    (t_after - t_before, t_before, t_after)
 }
 
 // Compute rise rate: fit a line to the first 25% of observations
@@ -537,7 +537,12 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>) ->
     
     // Compute complementary metrics: FWHM and rise/decay rates
     let peak_mag = mags.iter().cloned().fold(f64::INFINITY, f64::min);
-    let fwhm = compute_fwhm(times_pred, &mags);
+    let (fwhm_calc, t_before, t_after) = compute_fwhm(times_pred, &mags);
+    let fwhm = if !t_before.is_nan() && !t_after.is_nan() {
+        t_after - t_before  // Use actual crossing boundaries
+    } else {
+        fwhm_calc  // Fallback to calculated value if no crossings found
+    };
     let rise_rate = compute_rise_rate(times_pred, &mags);
     let decay_rate = compute_decay_rate(times_pred, &mags);
     
@@ -770,10 +775,10 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
                t_before >= t_min && t_after <= t_max {
                 chart.draw_series(std::iter::once(plotters::prelude::Polygon::new(
                     vec![
-                        (t_before, y_top),
-                        (t_after, y_top),
-                        (t_after, y_bottom),
-                        (t_before, y_bottom),
+                        (fwhm_start, y_top),
+                        (fwhm_end, y_top),
+                        (fwhm_end, y_bottom),
+                        (fwhm_start, y_bottom),
                     ],
                     CYAN.mix(0.4).filled()  // More opaque cyan for visibility
                 )))?;
