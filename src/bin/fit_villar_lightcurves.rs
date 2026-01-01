@@ -31,6 +31,9 @@ struct VillarTimescaleParams {
     fwhm: f64,           // Full Width at Half Maximum (days)
     rise_rate: f64,      // Rise rate (mag/day)
     decay_rate: f64,     // Decay rate (mag/day)
+    // Power law parameters (NaN for Villar models)
+    powerlaw_amplitude: f64,  // a in power law: a * (t - t0)^(-alpha)
+    powerlaw_index: f64,      // alpha in power law
 }
 
 #[derive(Clone)]
@@ -178,8 +181,10 @@ pub fn villar_flux_decay(a: f64, beta: f64, gamma: f64, t0: f64, tau_fall: f64, 
 
 pub fn powerlaw_flux(a: f64, alpha: f64, t0: f64, t: f64) -> f64 {
     let phase = t - t0;
+    // Power law should apply for all observed times (phase > 0)
+    // If phase <= 0, return a very large flux (invisible/not observed)
     if phase <= 0.0 {
-        a
+        f64::INFINITY  // Model predicts no flux before t0 (explosion time)
     } else {
         a * phase.powf(-alpha)
     }
@@ -202,9 +207,9 @@ fn median(xs: &mut [f64]) -> Option<f64> {
 
 // Compute Full Width at Half Maximum (FWHM) in magnitude space
 // Finds the time span where magnitude is within 0.75 mag of peak (50% flux)
-fn compute_fwhm(times: &[f64], mags: &[f64]) -> f64 {
+fn compute_fwhm(times: &[f64], mags: &[f64]) -> (f64, f64, f64) {
     if times.is_empty() || mags.is_empty() {
-        return f64::NAN;
+        return (f64::NAN, f64::NAN, f64::NAN);
     }
     
     // Find peak (minimum magnitude)
@@ -535,6 +540,16 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>) ->
         }
     };
     
+    // Extract power law parameters
+    let (powerlaw_amplitude, powerlaw_index) = match variant {
+        ModelVariant::PowerLaw => {
+            let a = params[0].exp();
+            let alpha = params[1];
+            (a, alpha)
+        }
+        _ => (f64::NAN, f64::NAN),  // NaN for non-power-law models
+    };
+    
     // Compute complementary metrics: FWHM and rise/decay rates
     let peak_mag = mags.iter().cloned().fold(f64::INFINITY, f64::min);
     let (fwhm_calc, t_before, t_after) = compute_fwhm(times_pred, &mags);
@@ -559,6 +574,8 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>) ->
         fwhm,
         rise_rate,
         decay_rate,
+        powerlaw_amplitude,
+        powerlaw_index,
     };
 
     (mags, mags_upper, mags_lower, chi2_best, format!("{:?}", variant), param_summary, params, timescale_params)
@@ -775,10 +792,10 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
                t_before >= t_min && t_after <= t_max {
                 chart.draw_series(std::iter::once(plotters::prelude::Polygon::new(
                     vec![
-                        (fwhm_start, y_top),
-                        (fwhm_end, y_top),
-                        (fwhm_end, y_bottom),
-                        (fwhm_start, y_bottom),
+                        (t_before, y_top),
+                        (t_after, y_top),
+                        (t_after, y_bottom),
+                        (t_before, y_bottom),
                     ],
                     CYAN.mix(0.4).filled()  // More opaque cyan for visibility
                 )))?;
@@ -899,7 +916,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Save timescale parameters to CSV
     let csv_path = "villar_timescale_parameters.csv";
     if !all_params.is_empty() {
-        let mut csv_content = String::from("object,band,variant,rise_time_days,decay_time_days,peak_time_days,chi2,n_obs,fwhm_days,rise_rate_mag_per_day,decay_rate_mag_per_day\n");
+        let mut csv_content = String::from("object,band,variant,rise_time_days,decay_time_days,peak_time_days,chi2,n_obs,fwhm_days,rise_rate_mag_per_day,decay_rate_mag_per_day,powerlaw_amplitude,powerlaw_index\n");
         for param in &all_params {
             // Extract object and band from the combined "object|band" format
             let (object, band) = if let Some(pipe_idx) = param.band.find('|') {
@@ -907,7 +924,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 ("unknown", param.band.as_str())
             };
-            csv_content.push_str(&format!("{},{},{},{},{},{},{:.3},{},{},{},{}\n",
+            csv_content.push_str(&format!("{},{},{},{},{},{},{:.3},{},{},{},{},{},{}\n",
                 object, band, param.variant,
                 if param.rise_time.is_nan() { String::from("NaN") } else { format!("{:.3}", param.rise_time) },
                 if param.decay_time.is_nan() { String::from("NaN") } else { format!("{:.3}", param.decay_time) },
@@ -915,7 +932,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 param.chi2, param.n_obs,
                 if param.fwhm.is_nan() { String::from("NaN") } else { format!("{:.3}", param.fwhm) },
                 if param.rise_rate.is_nan() { String::from("NaN") } else { format!("{:.6}", param.rise_rate) },
-                if param.decay_rate.is_nan() { String::from("NaN") } else { format!("{:.6}", param.decay_rate) }
+                if param.decay_rate.is_nan() { String::from("NaN") } else { format!("{:.6}", param.decay_rate) },
+                if param.powerlaw_amplitude.is_nan() { String::from("NaN") } else { format!("{:.6}", param.powerlaw_amplitude) },
+                if param.powerlaw_index.is_nan() { String::from("NaN") } else { format!("{:.6}", param.powerlaw_index) }
             ));
         }
         fs::write(csv_path, csv_content)?;
