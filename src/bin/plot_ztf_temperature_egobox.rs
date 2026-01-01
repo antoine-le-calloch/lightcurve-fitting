@@ -96,6 +96,10 @@ struct TimescaleParams {
     gp_predicted_mag_2d: f64,
     gp_time_to_peak: f64,
     gp_extrap_slope: f64,
+    gp_T_peak: f64,
+    gp_T_now: f64,
+    gp_dTdt_peak: f64,
+    gp_dTdt_now: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +111,10 @@ struct PredictiveFeatures {
     gp_predicted_mag_2d: f64,
     gp_time_to_peak: f64,
     gp_extrap_slope: f64,
+    gp_T_peak: f64,
+    gp_T_now: f64,
+    gp_dTdt_peak: f64,
+    gp_dTdt_now: f64,
 }
 
 fn read_ztf_lightcurve(path: &str) -> Result<HashMap<String, BandData>, Box<dyn std::error::Error>> {
@@ -404,6 +412,8 @@ fn compute_predictive_features(
     gp: &GaussianProcess<f64, ConstantMean, SquaredExponentialCorr>,
     t_last: f64,
     t0: f64,
+    temps: &[f64],  // Temperature series
+    times_pred: &[f64],  // Times corresponding to temperatures
 ) -> PredictiveFeatures {
 
     let dt = 1.0;
@@ -417,6 +427,39 @@ fn compute_predictive_features(
     let f_p2 = y[3];
     let f_p3 = y[4];
 
+    // Compute temperature features
+    let (gp_T_peak, gp_T_now, gp_dTdt_peak, gp_dTdt_now) = if !temps.is_empty() && !times_pred.is_empty() {
+        // Find peak temperature
+        let (t_peak_idx, t_peak_val) = temps.iter().enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, &v)| (i, v))
+            .unwrap_or((0, f64::NAN));
+        
+        // Current temperature (last value)
+        let t_now = temps.last().copied().unwrap_or(f64::NAN);
+        
+        // Temperature rate of change at peak
+        let dt_temp = if times_pred.len() > 1 { times_pred[1] - times_pred[0] } else { 1.0 };
+        let dtdt_peak = if t_peak_idx > 0 && t_peak_idx < temps.len() - 1 {
+            (temps[t_peak_idx + 1] - temps[t_peak_idx - 1]) / (2.0 * dt_temp)
+        } else {
+            f64::NAN
+        };
+        
+        // Current temperature derivative (last point)
+        let dtdt_now = if temps.len() > 1 && times_pred.len() > 1 {
+            let n = temps.len();
+            let dt_temp = times_pred[n-1] - times_pred[n-2];
+            (temps[n-1] - temps[n-2]) / dt_temp
+        } else {
+            f64::NAN
+        };
+        
+        (t_peak_val, t_now, dtdt_peak, dtdt_now)
+    } else {
+        (f64::NAN, f64::NAN, f64::NAN, f64::NAN)
+    };
+
     PredictiveFeatures {
         gp_dfdt_now: (f_0 - f_m1) / dt,
         gp_dfdt_next: (f_p1 - f_0) / dt,
@@ -425,6 +468,10 @@ fn compute_predictive_features(
         gp_predicted_mag_2d: f_p2,
         gp_time_to_peak: t0 - t_last,
         gp_extrap_slope: (f_p3 - f_p2) / dt,
+        gp_T_peak,
+        gp_T_now,
+        gp_dTdt_peak,
+        gp_dTdt_now,
     }
 }
 
@@ -576,7 +623,8 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
                 let decay_rate = compute_decay_rate(&times_pred, &pred);
 
                 let t_last = *band_data.times.last().unwrap();
-                let predictive = compute_predictive_features(&gp_fit, t_last, t0);
+                // For now, pass empty temperature data; will be updated later if multi-band
+                let predictive = compute_predictive_features(&gp_fit, t_last, t0, &[], &[]);
 
                 // Store timescale parameters
                 timescale_params.push(TimescaleParams {
@@ -599,6 +647,10 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
                     gp_predicted_mag_2d: predictive.gp_predicted_mag_2d,
                     gp_time_to_peak: predictive.gp_time_to_peak,
                     gp_extrap_slope: predictive.gp_extrap_slope,
+                    gp_T_peak: predictive.gp_T_peak,
+                    gp_T_now: predictive.gp_T_now,
+                    gp_dTdt_peak: predictive.gp_dTdt_peak,
+                    gp_dTdt_now: predictive.gp_dTdt_now,
                 });
                 
                 eprintln!("  {} chi2={:.3} (baseline={:.1}), N={}", band_name, chi2_reduced, baseline_chi2, band_data.mags.len());
@@ -935,6 +987,48 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
     println!("✓ Generated {} (1600×800)", output_path.display());
     println!("  Temperature range: {:.0} - {:.0} K", temp_min, temp_max);
     
+    // Update timescale_params with temperature features
+    if !temps_recovered.is_empty() && !timescale_params.is_empty() {
+        // Compute temperature features
+        let (t_peak, t_now, dtdt_peak, dtdt_now) = {
+            // Find peak temperature
+            let (t_peak_idx, t_peak_val) = temps_recovered.iter().enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(i, &v)| (i, v))
+                .unwrap_or((0, f64::NAN));
+            
+            // Current temperature (last value)
+            let t_now = temps_recovered.last().copied().unwrap_or(f64::NAN);
+            
+            // Temperature rate of change at peak
+            let dt_temp = if times_pred.len() > 1 { times_pred[1] - times_pred[0] } else { 1.0 };
+            let dtdt_peak = if t_peak_idx > 0 && t_peak_idx < temps_recovered.len() - 1 {
+                (temps_recovered[t_peak_idx + 1] - temps_recovered[t_peak_idx - 1]) / (2.0 * dt_temp)
+            } else {
+                f64::NAN
+            };
+            
+            // Current temperature derivative (last point)
+            let dtdt_now = if temps_recovered.len() > 1 && times_pred.len() > 1 {
+                let n = temps_recovered.len();
+                let dt_temp = times_pred[n-1] - times_pred[n-2];
+                (temps_recovered[n-1] - temps_recovered[n-2]) / dt_temp
+            } else {
+                f64::NAN
+            };
+            
+            (t_peak_val, t_now, dtdt_peak, dtdt_now)
+        };
+        
+        // Update all bands with the same temperature features (since temp is computed from all bands)
+        for param in &mut timescale_params {
+            param.gp_T_peak = t_peak;
+            param.gp_T_now = t_now;
+            param.gp_dTdt_peak = dtdt_peak;
+            param.gp_dTdt_now = dtdt_now;
+        }
+    }
+    
     Ok((total_fit_time, timescale_params))
 }
 
@@ -987,9 +1081,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Save timescale parameters to CSV
     let csv_path = "gp_timescale_parameters.csv";
     if !all_params.is_empty() {
-        let mut csv_content = String::from("object,band,rise_time_days,decay_time_days,t0_days,peak_mag,chi2,baseline_chi2,n_obs,fwhm_days,rise_rate_mag_per_day,decay_rate_mag_per_day,gp_dfdt_now,gp_dfdt_next,gp_d2fdt2_now,gp_predicted_mag_1d,gp_predicted_mag_2d,gp_time_to_peak,gp_extrap_slope\n");
+        let mut csv_content = String::from("object,band,rise_time_days,decay_time_days,t0_days,peak_mag,chi2,baseline_chi2,n_obs,fwhm_days,rise_rate_mag_per_day,decay_rate_mag_per_day,gp_dfdt_now,gp_dfdt_next,gp_d2fdt2_now,gp_predicted_mag_1d,gp_predicted_mag_2d,gp_time_to_peak,gp_extrap_slope,gp_T_peak,gp_T_now,gp_dTdt_peak,gp_dTdt_now\n");
         for param in &all_params {
-            csv_content.push_str(&format!("{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.1},{},{},{},{},{},{},{},{},{},{},{}\n",
+            csv_content.push_str(&format!("{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.1},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 param.object, param.band, param.rise_time, param.decay_time, param.t0,
                 param.peak_mag, param.chi2, param.baseline_chi2, param.n_obs,
                 if param.fwhm.is_nan() { String::from("NaN") } else { format!("{:.3}", param.fwhm) },
@@ -1001,7 +1095,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if param.gp_predicted_mag_1d.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_predicted_mag_1d)},
                 if param.gp_predicted_mag_2d.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_predicted_mag_2d)},
                 if param.gp_time_to_peak.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_time_to_peak)},
-                if param.gp_extrap_slope.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_extrap_slope)}
+                if param.gp_extrap_slope.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_extrap_slope)},
+                if param.gp_T_peak.is_nan() { String::from("NaN") } else { format!("{:.1}", param.gp_T_peak)},
+                if param.gp_T_now.is_nan() { String::from("NaN") } else { format!("{:.1}", param.gp_T_now)},
+                if param.gp_dTdt_peak.is_nan() { String::from("NaN") } else { format!("{:.3}", param.gp_dTdt_peak)},
+                if param.gp_dTdt_now.is_nan() { String::from("NaN") } else { format!("{:.3}", param.gp_dTdt_now)}
             ));
         }
         fs::write(csv_path, csv_content)?;
