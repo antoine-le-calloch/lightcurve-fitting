@@ -100,6 +100,18 @@ struct TimescaleParams {
     gp_T_now: f64,
     gp_dTdt_peak: f64,
     gp_dTdt_now: f64,
+    // New high-priority features
+    gp_sigma_f: f64,           // RMS of GP posterior mean
+    gp_peak_to_peak: f64,      // max(f̂) − min(f̂)
+    gp_snr_max: f64,           // max SNR
+    gp_dfdt_max: f64,          // max rise rate (most positive dfdt)
+    gp_dfdt_min: f64,          // max decline rate (most negative dfdt)
+    gp_frac_of_peak: f64,      // f_last / f_peak
+    gp_post_var_mean: f64,     // mean posterior variance
+    gp_post_var_max: f64,      // max posterior variance
+    gp_skewness: f64,          // skewness of f̂
+    gp_kurtosis: f64,          // kurtosis of f̂
+    gp_n_inflections: f64,     // number of inflection points in GP mean
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +127,18 @@ struct PredictiveFeatures {
     gp_T_now: f64,
     gp_dTdt_peak: f64,
     gp_dTdt_now: f64,
+    // New high-priority features
+    gp_sigma_f: f64,
+    gp_peak_to_peak: f64,
+    gp_snr_max: f64,
+    gp_dfdt_max: f64,
+    gp_dfdt_min: f64,
+    gp_frac_of_peak: f64,
+    gp_post_var_mean: f64,
+    gp_post_var_max: f64,
+    gp_skewness: f64,
+    gp_kurtosis: f64,
+    gp_n_inflections: f64,
 }
 
 fn read_ztf_lightcurve(path: &str) -> Result<HashMap<String, BandData>, Box<dyn std::error::Error>> {
@@ -414,6 +438,10 @@ fn compute_predictive_features(
     t0: f64,
     temps: &[f64],  // Temperature series
     times_pred: &[f64],  // Times corresponding to temperatures
+    pred: &[f64],  // GP predictions (magnitudes)
+    std: &[f64],   // GP standard deviations
+    obs_mags: &[f64],  // Observed magnitudes
+    obs_errors: &[f64],  // Observed errors
 ) -> PredictiveFeatures {
 
     let dt = 1.0;
@@ -460,6 +488,121 @@ fn compute_predictive_features(
         (f64::NAN, f64::NAN, f64::NAN, f64::NAN)
     };
 
+    // Compute new high-priority features
+    // 1. Variability strength
+    let gp_sigma_f = if !pred.is_empty() {
+        let mean = pred.iter().sum::<f64>() / pred.len() as f64;
+        (pred.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / pred.len() as f64).sqrt()
+    } else {
+        f64::NAN
+    };
+    
+    let gp_peak_to_peak = if !pred.is_empty() {
+        let max_mag = pred.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let min_mag = pred.iter().cloned().fold(f64::INFINITY, f64::min);
+        max_mag - min_mag
+    } else {
+        f64::NAN
+    };
+    
+    let gp_snr_max = if !pred.is_empty() && !std.is_empty() && !obs_mags.is_empty() && !obs_errors.is_empty() {
+        obs_mags.iter().zip(obs_errors.iter())
+            .map(|(mag, err)| mag.abs() / err)
+            .fold(f64::NEG_INFINITY, f64::max)
+    } else {
+        f64::NAN
+    };
+    
+    // 2. Derivative features
+    let gp_dfdt_max = if pred.len() > 1 && times_pred.len() > 1 {
+        let dt_grid = times_pred[1] - times_pred[0];
+        (0..pred.len()-1)
+            .map(|i| (pred[i+1] - pred[i]) / dt_grid)
+            .fold(f64::NEG_INFINITY, f64::max)
+    } else {
+        f64::NAN
+    };
+    
+    let gp_dfdt_min = if pred.len() > 1 && times_pred.len() > 1 {
+        let dt_grid = times_pred[1] - times_pred[0];
+        (0..pred.len()-1)
+            .map(|i| (pred[i+1] - pred[i]) / dt_grid)
+            .fold(f64::INFINITY, f64::min)
+    } else {
+        f64::NAN
+    };
+    
+    // 3. Phase feature
+    let gp_frac_of_peak = if !pred.is_empty() {
+        let peak_mag = pred.iter().cloned().fold(f64::INFINITY, f64::min);
+        let last_mag = pred.last().copied().unwrap_or(f64::NAN);
+        last_mag / peak_mag
+    } else {
+        f64::NAN
+    };
+    
+    // 4. Uncertainty quantification
+    let gp_post_var_mean = if !std.is_empty() {
+        std.iter().map(|s| s * s).sum::<f64>() / std.len() as f64
+    } else {
+        f64::NAN
+    };
+    
+    let gp_post_var_max = if !std.is_empty() {
+        std.iter().map(|s| s * s).fold(f64::NEG_INFINITY, f64::max)
+    } else {
+        f64::NAN
+    };
+    
+    // 5. Statistical shape features
+    let (gp_skewness, gp_kurtosis) = if !pred.is_empty() && pred.len() > 3 {
+        let mean = pred.iter().sum::<f64>() / pred.len() as f64;
+        let variance = pred.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / pred.len() as f64;
+        let std_dev = variance.sqrt();
+        
+        if std_dev > 1e-10 {
+            let skew = pred.iter()
+                .map(|&x| ((x - mean) / std_dev).powi(3))
+                .sum::<f64>() / pred.len() as f64;
+            
+            let kurt = pred.iter()
+                .map(|&x| ((x - mean) / std_dev).powi(4))
+                .sum::<f64>() / pred.len() as f64 - 3.0;  // Excess kurtosis
+            
+            (skew, kurt)
+        } else {
+            (f64::NAN, f64::NAN)
+        }
+    } else {
+        (f64::NAN, f64::NAN)
+    };
+
+    // 6. Inflection points: count sign changes in second derivative of GP mean
+    let gp_n_inflections = if pred.len() > 2 && times_pred.len() > 2 {
+        // compute second derivative on prediction grid
+        let dt_grid = times_pred[1] - times_pred[0];
+        let mut d2: Vec<f64> = Vec::with_capacity(pred.len().saturating_sub(2));
+        for i in 1..(pred.len()-1) {
+            let v = (pred[i+1] - 2.0*pred[i] + pred[i-1]) / (dt_grid * dt_grid);
+            d2.push(v);
+        }
+        // count sign changes where values exceed noise threshold
+        let eps = 1e-6_f64;
+        let mut count = 0usize;
+        for i in 0..(d2.len().saturating_sub(1)) {
+            let a = d2[i];
+            let b = d2[i+1];
+            if a.is_finite() && b.is_finite() {
+                if a.abs() > eps && b.abs() > eps && (a * b) < 0.0 {
+                    count += 1;
+                }
+            }
+        }
+        count as f64
+    } else {
+        f64::NAN
+    };
+
     PredictiveFeatures {
         gp_dfdt_now: (f_0 - f_m1) / dt,
         gp_dfdt_next: (f_p1 - f_0) / dt,
@@ -472,6 +615,17 @@ fn compute_predictive_features(
         gp_T_now,
         gp_dTdt_peak,
         gp_dTdt_now,
+        gp_sigma_f,
+        gp_peak_to_peak,
+        gp_snr_max,
+        gp_dfdt_max,
+        gp_dfdt_min,
+        gp_frac_of_peak,
+        gp_post_var_mean,
+        gp_post_var_max,
+        gp_skewness,
+        gp_kurtosis,
+        gp_n_inflections,
     }
 }
 
@@ -571,17 +725,30 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
             
             let pred_arr = gp_fit.predict(&times_pred_2d).unwrap();
             let pred = pred_arr.column(0).to_vec();
-            // egobox-gp doesn't have predict_var, use predict only
-            let pred_mean = gp_fit.predict(&times_pred_2d);
-            let std = vec![0.1; pred.len()];  // Placeholder std
             
-            // Compute chi^2 at the original data points to assess fit quality
+            // Estimate GP uncertainty from residuals at observed points
+            // egobox-gp doesn't expose predict_var, so we estimate std from fit quality
             let times_orig_2d = Array1::from_vec(band_data.times.clone())
                 .view()
                 .insert_axis(Axis(1))
                 .to_owned();
             let pred_at_obs_arr = gp_fit.predict(&times_orig_2d).unwrap();
             let pred_at_obs = pred_at_obs_arr.column(0);
+            
+            // Compute RMS residual as estimate of GP uncertainty
+            let mut residuals_sq = 0.0;
+            for i in 0..band_data.mags.len() {
+                let residual = band_data.mags[i] - pred_at_obs[i];
+                residuals_sq += residual * residual;
+            }
+            let rms_residual = (residuals_sq / band_data.mags.len() as f64).sqrt();
+            
+            // Use RMS as a constant uncertainty estimate (conservative)
+            // In reality, uncertainty varies with distance from data, but egobox doesn't expose this
+            let std = vec![rms_residual; pred.len()];
+            
+            // Compute chi^2 at the original data points to assess fit quality
+            // (pred_at_obs already computed above for uncertainty estimation)
             {
                 let mut chi2 = 0.0;
                 let mut baseline_var = 0.0;
@@ -623,8 +790,11 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
                 let decay_rate = compute_decay_rate(&times_pred, &pred);
 
                 let t_last = *band_data.times.last().unwrap();
-                // For now, pass empty temperature data; will be updated later if multi-band
-                let predictive = compute_predictive_features(&gp_fit, t_last, t0, &[], &[]);
+                // Pass GP predictions and observations for feature computation
+                let predictive = compute_predictive_features(
+                    &gp_fit, t_last, t0, &[], &times_pred, &pred, &std,
+                    &band_data.mags, &band_data.errors
+                );
 
                 // Store timescale parameters
                 timescale_params.push(TimescaleParams {
@@ -651,6 +821,17 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
                     gp_T_now: predictive.gp_T_now,
                     gp_dTdt_peak: predictive.gp_dTdt_peak,
                     gp_dTdt_now: predictive.gp_dTdt_now,
+                    gp_sigma_f: predictive.gp_sigma_f,
+                    gp_peak_to_peak: predictive.gp_peak_to_peak,
+                    gp_snr_max: predictive.gp_snr_max,
+                    gp_dfdt_max: predictive.gp_dfdt_max,
+                    gp_dfdt_min: predictive.gp_dfdt_min,
+                    gp_frac_of_peak: predictive.gp_frac_of_peak,
+                    gp_post_var_mean: predictive.gp_post_var_mean,
+                    gp_post_var_max: predictive.gp_post_var_max,
+                    gp_skewness: predictive.gp_skewness,
+                    gp_kurtosis: predictive.gp_kurtosis,
+                    gp_n_inflections: predictive.gp_n_inflections,
                 });
                 
                 eprintln!("  {} chi2={:.3} (baseline={:.1}), N={}", band_name, chi2_reduced, baseline_chi2, band_data.mags.len());
@@ -1081,28 +1262,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Save timescale parameters to CSV
     let csv_path = "gp_timescale_parameters.csv";
     if !all_params.is_empty() {
-        let mut csv_content = String::from("object,band,rise_time_days,decay_time_days,t0_days,peak_mag,chi2,baseline_chi2,n_obs,fwhm_days,rise_rate_mag_per_day,decay_rate_mag_per_day,gp_dfdt_now,gp_dfdt_next,gp_d2fdt2_now,gp_predicted_mag_1d,gp_predicted_mag_2d,gp_time_to_peak,gp_extrap_slope,gp_T_peak,gp_T_now,gp_dTdt_peak,gp_dTdt_now\n");
+
+        // Also write a full CSV (gp_timescale_parameters.csv) including gp_n_inflections
+        let csv_full_path = "gp_timescale_parameters.csv";
+        let mut csv_full = String::from("object,band,rise_time_days,decay_time_days,t0_days,peak_mag,chi2,baseline_chi2,n_obs,fwhm_days,rise_rate_mag_per_day,decay_rate_mag_per_day,gp_dfdt_now,gp_dfdt_next,gp_d2fdt2_now,gp_predicted_mag_1d,gp_predicted_mag_2d,gp_time_to_peak,gp_extrap_slope,gp_T_peak,gp_T_now,gp_dTdt_peak,gp_dTdt_now,gp_sigma_f,gp_peak_to_peak,gp_snr_max,gp_dfdt_max,gp_dfdt_min,gp_frac_of_peak,gp_post_var_mean,gp_post_var_max,gp_skewness,gp_kurtosis,gp_n_inflections\n");
         for param in &all_params {
-            csv_content.push_str(&format!("{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.1},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
-                param.object, param.band, param.rise_time, param.decay_time, param.t0,
-                param.peak_mag, param.chi2, param.baseline_chi2, param.n_obs,
-                if param.fwhm.is_nan() { String::from("NaN") } else { format!("{:.3}", param.fwhm) },
-                if param.rise_rate.is_nan() { String::from("NaN") } else { format!("{:.6}", param.rise_rate) },
-                if param.decay_rate.is_nan() { String::from("NaN") } else { format!("{:.6}", param.decay_rate) },
-                if param.gp_dfdt_now.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_dfdt_now)}, 
-                if param.gp_dfdt_next.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_dfdt_next)},
-                if param.gp_d2fdt2_now.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_d2fdt2_now)},
-                if param.gp_predicted_mag_1d.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_predicted_mag_1d)},
-                if param.gp_predicted_mag_2d.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_predicted_mag_2d)},
-                if param.gp_time_to_peak.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_time_to_peak)},
-                if param.gp_extrap_slope.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_extrap_slope)},
-                if param.gp_T_peak.is_nan() { String::from("NaN") } else { format!("{:.1}", param.gp_T_peak)},
-                if param.gp_T_now.is_nan() { String::from("NaN") } else { format!("{:.1}", param.gp_T_now)},
-                if param.gp_dTdt_peak.is_nan() { String::from("NaN") } else { format!("{:.3}", param.gp_dTdt_peak)},
-                if param.gp_dTdt_now.is_nan() { String::from("NaN") } else { format!("{:.3}", param.gp_dTdt_now)}
-            ));
+            let mut row: Vec<String> = Vec::new();
+            row.push(param.object.clone());
+            row.push(param.band.clone());
+            row.push(format!("{:.3}", param.rise_time));
+            row.push(format!("{:.3}", param.decay_time));
+            row.push(format!("{:.3}", param.t0));
+            row.push(format!("{:.3}", param.peak_mag));
+            row.push(format!("{:.3}", param.chi2));
+            row.push(format!("{:.1}", param.baseline_chi2));
+            row.push(format!("{}", param.n_obs));
+            row.push(if param.fwhm.is_nan() { String::from("NaN") } else { format!("{:.3}", param.fwhm) });
+            row.push(if param.rise_rate.is_nan() { String::from("NaN") } else { format!("{:.6}", param.rise_rate) });
+            row.push(if param.decay_rate.is_nan() { String::from("NaN") } else { format!("{:.6}", param.decay_rate) });
+            row.push(if param.gp_dfdt_now.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_dfdt_now)});
+            row.push(if param.gp_dfdt_next.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_dfdt_next)});
+            row.push(if param.gp_d2fdt2_now.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_d2fdt2_now)});
+            row.push(if param.gp_predicted_mag_1d.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_predicted_mag_1d)});
+            row.push(if param.gp_predicted_mag_2d.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_predicted_mag_2d)});
+            row.push(if param.gp_time_to_peak.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_time_to_peak)});
+            row.push(if param.gp_extrap_slope.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_extrap_slope)});
+            row.push(if param.gp_T_peak.is_nan() { String::from("NaN") } else { format!("{:.1}", param.gp_T_peak)});
+            row.push(if param.gp_T_now.is_nan() { String::from("NaN") } else { format!("{:.1}", param.gp_T_now)});
+            row.push(if param.gp_dTdt_peak.is_nan() { String::from("NaN") } else { format!("{:.3}", param.gp_dTdt_peak)});
+            row.push(if param.gp_dTdt_now.is_nan() { String::from("NaN") } else { format!("{:.3}", param.gp_dTdt_now)});
+            row.push(if param.gp_sigma_f.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_sigma_f)});
+            row.push(if param.gp_peak_to_peak.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_peak_to_peak)});
+            row.push(if param.gp_snr_max.is_nan() { String::from("NaN") } else { format!("{:.3}", param.gp_snr_max)});
+            row.push(if param.gp_dfdt_max.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_dfdt_max)});
+            row.push(if param.gp_dfdt_min.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_dfdt_min)});
+            row.push(if param.gp_frac_of_peak.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_frac_of_peak)});
+            row.push(if param.gp_post_var_mean.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_post_var_mean)});
+            row.push(if param.gp_post_var_max.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_post_var_max)});
+            row.push(if param.gp_skewness.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_skewness)});
+            row.push(if param.gp_kurtosis.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_kurtosis)});
+            row.push(if param.gp_n_inflections.is_nan() { String::from("NaN") } else { format!("{:.0}", param.gp_n_inflections)});
+            csv_full.push_str(&row.join(","));
+            csv_full.push_str("\n");
         }
-        fs::write(csv_path, csv_content)?;
+        fs::write(csv_full_path, csv_full)?;
         println!("✓ Timescale parameters saved to: {}", csv_path);
     }
 
