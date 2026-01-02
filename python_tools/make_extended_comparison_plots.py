@@ -6,7 +6,7 @@ from scipy import stats
 
 # Read GP data
 gp_data = {}
-with open('gp_timescale_parameters.csv') as f:
+with open('nonparametric_timescale_parameters.csv') as f:
     reader = csv.DictReader(f)
     for row in reader:
         key = (row['object'], row['band'])
@@ -23,7 +23,7 @@ with open('gp_timescale_parameters.csv') as f:
 
 # Read Villar data
 villar_data = {}
-with open('villar_timescale_parameters.csv') as f:
+with open('parametric_timescale_parameters.csv') as f:
     reader = csv.DictReader(f)
     for row in reader:
         key = (row['object'], row['band'])
@@ -61,6 +61,12 @@ fall_fwhm_gp_x = []  # fall values where we also have fwhm
 fall_fwhm_gp_y = []  # fwhm values where we also have fall
 fall_fwhm_vil_x = []
 fall_fwhm_vil_y = []
+
+# For rise vs decay rate (need matched pairs)
+rise_decay_gp_x = []  # rise rate where we also have decay rate
+rise_decay_gp_y = []  # decay rate where we also have rise rate
+rise_decay_vil_x = []
+rise_decay_vil_y = []
 
 for obj, band in common_keys:
     gp = gp_data[(obj, band)]
@@ -102,6 +108,14 @@ for obj, band in common_keys:
         fall_fwhm_gp_y.append(gp['fwhm'])
         fall_fwhm_vil_x.append(vil['τfall'])
         fall_fwhm_vil_y.append(vil['fwhm'])
+    
+    # Matched rise-decay rate pairs for scatter plot
+    if (not np.isnan(gp['rise_rate']) and not np.isnan(gp['decay_rate']) and
+        not np.isnan(vil['rise_rate']) and not np.isnan(vil['decay_rate'])):
+        rise_decay_gp_x.append(gp['rise_rate'])
+        rise_decay_gp_y.append(gp['decay_rate'])
+        rise_decay_vil_x.append(vil['rise_rate'])
+        rise_decay_vil_y.append(vil['decay_rate'])
 
 t0_gp = np.array(t0_gp)
 t0_vil = np.array(t0_vil)
@@ -119,6 +133,10 @@ fall_fwhm_gp_x = np.array(fall_fwhm_gp_x)
 fall_fwhm_gp_y = np.array(fall_fwhm_gp_y)
 fall_fwhm_vil_x = np.array(fall_fwhm_vil_x)
 fall_fwhm_vil_y = np.array(fall_fwhm_vil_y)
+rise_decay_gp_x = np.array(rise_decay_gp_x)
+rise_decay_gp_y = np.array(rise_decay_gp_y)
+rise_decay_vil_x = np.array(rise_decay_vil_x)
+rise_decay_vil_y = np.array(rise_decay_vil_y)
 
 # Create 3x3 figure for all 6 metrics
 fig = plt.figure(figsize=(18, 14))
@@ -138,7 +156,7 @@ def add_scatter(ax, x, y, title, xlabel, ylabel, log_scale=False):
     mask = ~(np.isnan(x) | np.isnan(y))
     if np.sum(mask) > 2:
         r, p = stats.pearsonr(x[mask], y[mask])
-        ax.text(0.05, 0.95, f'r={r:.3f}\nn={len(x)}', transform=ax.transAxes, 
+        ax.text(0.05, 0.95, f'r={r:.3f}\nn={len(x)}', transform=ax.transAxes,
                 verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
     ax.set_xlabel(xlabel)
@@ -226,7 +244,7 @@ if len(fall_fwhm_gp_x) > 0:
 # Row 3: Rise and Decay Rates
 # Panel 7: Rise rate scatter
 ax7 = plt.subplot(3, 3, 7)
-add_scatter(ax7, rise_rate_gp, rise_rate_vil, 'Rise Rate Comparison', 
+add_scatter(ax7, rise_rate_gp, rise_rate_vil, 'Rise Rate Comparison',
             'GP rise rate (mag/day)', 'Villar rise rate (mag/day)')
 ax7.set_xlim([-0.5,0.5])
 ax7.set_ylim([-0.5,0.5]) 
@@ -238,16 +256,19 @@ add_scatter(ax8, decay_rate_gp, decay_rate_vil, 'Decay Rate Comparison',
 ax8.set_xlim([-0.5,0.5])                   
 ax8.set_ylim([-0.5,0.5]) 
 
-# Panel 9: Rise vs Decay Rate (both methods)
+# Panel 9: Rise vs Decay Rate (both methods) - FIXED to use matched pairs
 ax9 = plt.subplot(3, 3, 9)
-ax9.scatter(rise_rate_gp, decay_rate_gp, alpha=0.5, s=20, label='GP')
-ax9.scatter(rise_rate_vil, decay_rate_vil, alpha=0.5, s=20, label='Villar')
+if len(rise_decay_gp_x) > 0:
+    ax9.scatter(rise_decay_gp_x, rise_decay_gp_y, alpha=0.5, s=20, label='GP')
+if len(rise_decay_vil_x) > 0:
+    ax9.scatter(rise_decay_vil_x, rise_decay_vil_y, alpha=0.5, s=20, label='Villar')
 ax9.set_xlabel('Rise rate (mag/day)')
 ax9.set_ylabel('Decay rate (mag/day)')
 ax9.set_title('Rise vs Decay Rates')
 ax9.set_xlim([-0.5,0.5])
 ax9.set_ylim([-0.5,0.5])  
 ax9.legend()
+ax9.grid(True, alpha=0.3)
 
 plt.tight_layout()
 plt.savefig('extended_comparison.png', dpi=150, bbox_inches='tight')
