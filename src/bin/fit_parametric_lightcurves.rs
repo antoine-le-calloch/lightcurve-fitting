@@ -12,7 +12,7 @@ use lightcurve_fiting::lightcurve_common::{BandData, read_ztf_lightcurve};
 // Zeropoint consistent with GP plotter
 const ZP: f64 = 23.9;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum ModelVariant {
     Full,
     DecayOnly,
@@ -143,11 +143,11 @@ fn pso_bounds(base: Option<&[f64]>, variant: ModelVariant) -> (Vec<f64>, Vec<f64
     }
 
     let mut lower = vec![-0.5, 0.0, -8.0, -5.0, -5.0, -5.0, -4.0];
-    let mut upper = vec![0.8, 0.08, 4.0, 100.0, 6.5, 6.5, -1.5];
+    let mut upper = vec![0.8, 0.08, 4.0, 100.0, 6.5, 7.5, -1.5];  // Increased tau_fall max from 6.5 to 7.5 (~1800 days)
     if matches!(variant, ModelVariant::FastDecay) {
         upper[1] = 0.02;
         upper[2] = 2.0;
-        upper[5] = 3.0;
+        upper[5] = 5.0;  // Increased from 3.0 to 5.0 (~150 days for fast decay)
         lower[5] = -4.0;
     }
     if let Some(b) = base {
@@ -305,8 +305,9 @@ fn compute_decay_rate(times: &[f64], mags: &[f64]) -> f64 {
 }
 
 // Adapter function to convert BandData to the tuple format used by parametric fitting
+// Parametric fitting needs flux values (not magnitudes), so we pass convert_to_mag=false
 fn read_lightcurve(path: &str) -> Result<HashMap<String, (Vec<f64>, Vec<f64>, Vec<f64>)>, Box<dyn std::error::Error>> {
-    let bands = read_ztf_lightcurve(path)?;
+    let bands = read_ztf_lightcurve(path, false)?;
     let result = bands
         .into_iter()
         .map(|(filter, bd)| (filter, (bd.times, bd.mags, bd.errors)))
@@ -332,7 +333,7 @@ struct RefFit {
     variant: ModelVariant,
 }
 
-fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>) -> (Vec<f64>, Vec<f64>, Vec<f64>, f64, String, String, Vec<f64>, VillarTimescaleParams) {
+fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, force_variant: Option<ModelVariant>) -> (Vec<f64>, Vec<f64>, Vec<f64>, f64, String, String, Vec<f64>, VillarTimescaleParams) {
     let run_fit = |base: Option<&[f64]>, variant: ModelVariant, iters: u64, particles: usize| {
         let (lower, upper) = pso_bounds(base, variant);
         let solver = ParticleSwarm::new((lower, upper), particles);
@@ -350,21 +351,28 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>) ->
     let is_sparse = data.times.len() < 50;
     let use_ref_variant = is_sparse && ref_fit.is_some();
 
-    let (params_full, chi2_full) = if !use_ref_variant || matches!(ref_fit.unwrap().variant, ModelVariant::Full) {
+    // If force_variant is specified, only try that variant (for non-reference bands)
+    let try_variants = if let Some(forced) = force_variant {
+        vec![forced]
+    } else {
+        vec![ModelVariant::Full, ModelVariant::FastDecay, ModelVariant::PowerLaw]
+    };
+
+    let (params_full, chi2_full) = if try_variants.contains(&ModelVariant::Full) {
         let base = if use_ref_variant { Some(ref_fit.unwrap().params.as_slice()) } else { None };
         run_fit(base, ModelVariant::Full, 100, 60)
     } else {
         (vec![], f64::INFINITY)
     };
     
-    let (params_fast, chi2_fast) = if !use_ref_variant || matches!(ref_fit.unwrap().variant, ModelVariant::FastDecay) {
+    let (params_fast, chi2_fast) = if try_variants.contains(&ModelVariant::FastDecay) {
         let base = if use_ref_variant { Some(ref_fit.unwrap().params.as_slice()) } else { None };
         run_fit(base, ModelVariant::FastDecay, 100, 60)
     } else {
         (vec![], f64::INFINITY)
     };
     
-    let (params_power, chi2_power) = if !use_ref_variant || matches!(ref_fit.unwrap().variant, ModelVariant::PowerLaw) {
+    let (params_power, chi2_power) = if try_variants.contains(&ModelVariant::PowerLaw) {
         let base = if use_ref_variant { Some(ref_fit.unwrap().params.as_slice()) } else { None };
         run_fit(base, ModelVariant::PowerLaw, 80, 50)
     } else {
@@ -377,6 +385,27 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>) ->
         if chi2_power < best.2 { best = (params_power, ModelVariant::PowerLaw, chi2_power); }
         best
     };
+
+    // If fitting completely failed, return NaN values
+    if params.is_empty() {
+        let nan_vec = vec![f64::NAN; times_pred.len()];
+        let failed_params = VillarTimescaleParams {
+            band: String::from("unknown"),
+            variant: String::from("NoFit"),
+            rise_time: f64::NAN,
+            decay_time: f64::NAN,
+            peak_time: f64::NAN,
+            peak_mag: f64::NAN,
+            chi2: chi2_best,
+            n_obs: data.times.len(),
+            fwhm: f64::NAN,
+            rise_rate: f64::NAN,
+            decay_rate: f64::NAN,
+            powerlaw_amplitude: f64::NAN,
+            powerlaw_index: f64::NAN,
+        };
+        return (nan_vec.clone(), nan_vec.clone(), nan_vec, chi2_best, String::from("NoFit"), String::from("chi2=NaN"), vec![f64::NAN; 7], failed_params);
+    }
 
     let sigma_extra = match variant {
         ModelVariant::PowerLaw => params[3].exp(),
@@ -608,18 +637,17 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
     // Fit all bands but only save timescale params for the first (most observations)
     for (i, (band_name, fit_data, mags_obs)) in band_data.iter().enumerate() {
         let fit_start = Instant::now();
-        let (mags_model, mags_upper, mags_lower, chi2, variant_str, param_summary, params, mut timescale_params) = fit_band(fit_data, &times_pred, ref_fit.as_ref());
+        
+        // Only the first (reference) band tries all variants; others use the reference variant
+        let force_variant = if i == 0 { None } else { ref_fit.as_ref().map(|rf| rf.variant) };
+        
+        let (mags_model, mags_upper, mags_lower, chi2, variant_str, param_summary, params, mut timescale_params) = fit_band(fit_data, &times_pred, ref_fit.as_ref(), force_variant);
         let fit_elapsed = fit_start.elapsed().as_secs_f64();
         total_fit_time += fit_elapsed;
 
-        // Only save timescale params for the first (most data) band
+        // Store reference fit from first (densest) band BEFORE processing other bands
+        // Always set reference from first band, regardless of point count
         if i == 0 {
-            timescale_params.band = band_name.clone();
-            timescale_params_all.push(timescale_params.clone());
-        }
-
-        // Store reference fit from first (densest) band
-        if ref_fit.is_none() && fit_data.times.len() >= 50 {
             let variant = if variant_str.contains("Full") {
                 ModelVariant::Full
             } else if variant_str.contains("PowerLaw") {
@@ -628,9 +656,15 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
                 ModelVariant::FastDecay
             };
             ref_fit = Some(RefFit {
-                params,
+                params: params.clone(),
                 variant,
             });
+        }
+
+        // Only save timescale params for the first (most data) band
+        if i == 0 {
+            timescale_params.band = band_name.clone();
+            timescale_params_all.push(timescale_params.clone());
         }
 
         let legend_label = format!("{} ({}; chi2={:.2}; N={})", band_name, param_summary, chi2, fit_data.times.len());
@@ -674,19 +708,20 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
     let y_top = (mag_max + mag_pad).min(25.0);
     let y_bottom = (mag_min - mag_pad).max(15.0);
 
-    let output_path = output_dir.join(format!("{}_villar.png", object_name));
+    let output_path = output_dir.join(format!("{}.png", object_name));
     let root = BitMapBackend::new(&output_path, (1600, 900)).into_drawing_area();
     root.fill(&WHITE)?;
     let mut chart = ChartBuilder::on(&root)
-        .caption(format!("{} - Villar fit", object_name), ("sans-serif", 28))
         .margin(12)
-        .x_label_area_size(40)
-        .y_label_area_size(60)
-        .build_cartesian_2d(t_min..t_max, y_top..y_bottom)?;
+        .x_label_area_size(70)
+        .y_label_area_size(90)
+        .build_cartesian_2d(t_min..t_max, y_top..y_bottom)?;;
 
     chart.configure_mesh()
         .x_desc("Time (days)")
-        .y_desc("Magnitude")
+        .y_desc("Flux")
+        .x_label_style(("sans-serif", 24))
+        .y_label_style(("sans-serif", 24))
         .draw()?;
 
     // Draw timescale markers (if available)
@@ -695,9 +730,9 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
         let t0 = params.peak_time;
         
         // FWHM shaded region - draw first so it's behind the t0 line
-        let fwhm = params.fwhm;
         let peak_mag = params.peak_mag;
-        if fwhm.is_finite() && fwhm > 0.0 && !band_plots.is_empty() {
+        // Try to draw FWHM region from fitted model curve regardless of stored FWHM value
+        if !band_plots.is_empty() {
             let first_band = &band_plots[0];
             let half_max_mag = peak_mag + 0.75;  // 0.75 mag fainter = 50% flux
             
@@ -800,6 +835,8 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
     chart.configure_series_labels()
         .background_style(&WHITE.mix(0.8))
         .border_style(&BLACK)
+        .label_font(("sans-serif", 30))
+        .margin(20)
         .draw()?;
 
     root.present()?;
@@ -840,7 +877,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         targets.sort();
     }
 
-    let output_dir = Path::new("villar_plots");
+    let output_dir = Path::new("parametric_plots");
     fs::create_dir_all(output_dir)?;
 
     let mut total_fit_time = 0.0;
@@ -858,7 +895,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Save timescale parameters to CSV
-    let csv_path = "villar_timescale_parameters.csv";
+    let csv_path = "parametric_timescale_parameters.csv";
     if !all_params.is_empty() {
         let mut csv_content = String::from("object,band,variant,rise_time_days,decay_time_days,peak_time_days,chi2,n_obs,fwhm_days,rise_rate_mag_per_day,decay_rate_mag_per_day,powerlaw_amplitude,powerlaw_index\n");
         for param in &all_params {
@@ -882,11 +919,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
         }
         fs::write(csv_path, csv_content)?;
-        println!("✓ Villar timescale parameters saved to: {}", csv_path);
+        println!("✓ Timescale parameters saved to: {}", csv_path);
     }
 
-    println!("\n✓ Completed {} light curves (Villar)", targets.len());
+    println!("\n✓ Completed {} light curves", targets.len());
     println!("  Plots in {}", output_dir.display());
-    println!("  Total Villar fitting time: {:.2}s", total_fit_time);
+    println!("  Total fitting time: {:.2}s", total_fit_time);
     Ok(())
 }

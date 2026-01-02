@@ -364,7 +364,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
         .trim_end_matches(".csv");
     
     // Read light curve data
-    let bands = read_ztf_lightcurve(input_path)?;
+    let bands = read_ztf_lightcurve(input_path, true)?;;
     
     if bands.is_empty() {
         eprintln!("No valid data found in {}", input_path);
@@ -589,7 +589,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
     ].iter().cloned().collect();
     
     // Create output plot
-    let output_path = output_dir.join(format!("{}_gp_temp.png", object_name));
+    let output_path = output_dir.join(format!("{}.png", object_name));
     let root = BitMapBackend::new(&output_path, (1600, 800))
         .into_drawing_area();
     
@@ -598,15 +598,16 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
     
     // Left panel: Light curves with GP fits
     let mut lc_chart = ChartBuilder::on(&areas[0])
-        .caption(format!("{} - Light Curves", object_name), ("sans-serif", 24))
         .margin(12)
-        .x_label_area_size(35)
-        .y_label_area_size(50)
+        .x_label_area_size(70)
+        .y_label_area_size(90)
         .build_cartesian_2d(t_min..t_max, mag_plot_max..mag_plot_min)?;
     
     lc_chart.configure_mesh()
         .x_desc("Time (days)")
         .y_desc("Magnitude")
+        .x_label_style(("sans-serif", 24))
+        .y_label_style(("sans-serif", 24))
         .draw()?;
     
     // Draw GP fits and observations with legend
@@ -737,6 +738,8 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
     lc_chart.configure_series_labels()
         .background_style(&WHITE.mix(0.8))
         .border_style(&BLACK)
+        .label_font(("sans-serif", 30))
+        .margin(20)
         .draw()?;
     
     // Draw timescale markers (if available)
@@ -862,15 +865,16 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
     let temp_plot_max = (temp_max + temp_range * 0.1).min(50000.0);
     
     let mut temp_chart = ChartBuilder::on(&areas[1])
-        .caption(format!("{} - Temperature", object_name), ("sans-serif", 24))
         .margin(12)
-        .x_label_area_size(35)
-        .y_label_area_size(50)
+        .x_label_area_size(70)
+        .y_label_area_size(90)
         .build_cartesian_2d(t_min..t_max, temp_plot_min..temp_plot_max)?;
     
     temp_chart.configure_mesh()
         .x_desc("Time (days)")
         .y_desc("Temperature (K)")
+        .x_label_style(("sans-serif", 24))
+        .y_label_style(("sans-serif", 24))
         .draw()?;
     
     if any_temp_band {
@@ -969,7 +973,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         targets.sort();
     }
 
-    let output_dir = Path::new("egobox_gp_plots");
+    let output_dir = Path::new("nonparametric_plots");
     fs::create_dir_all(output_dir)?;
 
     let mut total_fit_time = 0.0;
@@ -987,11 +991,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Save timescale parameters to CSV
-    let csv_path = "gp_timescale_parameters.csv";
+    let csv_path = "nonparametric_timescale_parameters.csv";
     if !all_params.is_empty() {
 
         // Also write a full CSV (gp_timescale_parameters.csv) including gp_n_inflections
-        let csv_full_path = "gp_timescale_parameters.csv";
         let mut csv_full = String::from("object,band,rise_time_days,decay_time_days,t0_days,peak_mag,chi2,baseline_chi2,n_obs,fwhm_days,rise_rate_mag_per_day,decay_rate_mag_per_day,gp_dfdt_now,gp_dfdt_next,gp_d2fdt2_now,gp_predicted_mag_1d,gp_predicted_mag_2d,gp_time_to_peak,gp_extrap_slope,gp_T_peak,gp_T_now,gp_dTdt_peak,gp_dTdt_now,gp_sigma_f,gp_peak_to_peak,gp_snr_max,gp_dfdt_max,gp_dfdt_min,gp_frac_of_peak,gp_post_var_mean,gp_post_var_max,gp_skewness,gp_kurtosis,gp_n_inflections\n");
         for param in &all_params {
             let mut row: Vec<String> = Vec::new();
@@ -1032,12 +1035,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             csv_full.push_str(&row.join(","));
             csv_full.push_str("\n");
         }
-        fs::write(csv_full_path, csv_full)?;
+        fs::write(csv_path, csv_full)?;
         println!("✓ Timescale parameters saved to: {}", csv_path);
     }
 
     println!("\n✓ Completed {} light curves", targets.len());
     println!("  Plots saved to: {}", output_dir.display());
-    println!("  Total GP fitting time: {:.2}s", total_fit_time);
+    println!("  Total fitting time: {:.2}s", total_fit_time);
     Ok(())
 }

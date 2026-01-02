@@ -47,7 +47,7 @@ pub struct TimescaleParams {
     pub gp_n_inflections: f64,
 }
 
-pub fn read_ztf_lightcurve(path: &str) -> Result<HashMap<String, BandData>, Box<dyn std::error::Error>> {
+pub fn read_ztf_lightcurve(path: &str, convert_to_mag: bool) -> Result<HashMap<String, BandData>, Box<dyn std::error::Error>> {
     let contents = fs::read_to_string(path)?;
     let mut bands: HashMap<String, BandData> = HashMap::new();
 
@@ -85,14 +85,23 @@ pub fn read_ztf_lightcurve(path: &str) -> Result<HashMap<String, BandData>, Box<
     for ((filter, _), (flux, mjd, flux_err)) in epoch_best.iter() {
         if mjd < &bulk_start { continue; }
         let delta_t = mjd - mjd_min;
-        let log_flux10 = flux.log10();
-        let log_sigma = flux_err / flux;
-        let mag = -2.5 * log_flux10 + 23.9;
-        let mag_err = 1.0857 * log_sigma;
+        
+        let (value, error) = if convert_to_mag {
+            // Convert flux to magnitude
+            let log_flux10 = flux.log10();
+            let log_sigma = flux_err / flux;
+            let mag = -2.5 * log_flux10 + 23.9;
+            let mag_err = 1.0857 * log_sigma;
+            (mag, mag_err)
+        } else {
+            // Keep as flux
+            (*flux, *flux_err)
+        };
+        
         let band = bands.entry(filter.clone()).or_insert_with(|| BandData { times: Vec::new(), mags: Vec::new(), errors: Vec::new() });
         band.times.push(delta_t);
-        band.mags.push(mag);
-        band.errors.push(mag_err);
+        band.mags.push(value);
+        band.errors.push(error);
     }
 
     Ok(bands)

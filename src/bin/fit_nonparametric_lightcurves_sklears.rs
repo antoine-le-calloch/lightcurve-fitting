@@ -235,7 +235,7 @@ fn compute_predictive_features(
 
 fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<TimescaleParams>), Box<dyn std::error::Error>> {
     let object_name = input_path.split('/').last().unwrap_or("unknown").trim_end_matches(".csv");
-    let bands = read_ztf_lightcurve(input_path)?;
+    let bands = read_ztf_lightcurve(input_path, true)?;;
     if bands.is_empty() { eprintln!("No valid data found in {}", input_path); return Ok((0.0, Vec::new())); }
 
     let mut t_min = f64::INFINITY; let mut t_max = f64::NEG_INFINITY;
