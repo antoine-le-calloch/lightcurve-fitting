@@ -7,6 +7,8 @@ use argmin::core::{CostFunction, Error as ArgminError, Executor, State};
 use argmin::solver::particleswarm::ParticleSwarm;
 use plotters::prelude::*;
 
+use lightcurve_fiting::lightcurve_common::{BandData, read_ztf_lightcurve};
+
 // Zeropoint consistent with GP plotter
 const ZP: f64 = 23.9;
 
@@ -302,74 +304,15 @@ fn compute_decay_rate(times: &[f64], mags: &[f64]) -> f64 {
     slope
 }
 
+// Adapter function to convert BandData to the tuple format used by parametric fitting
 fn read_lightcurve(path: &str) -> Result<HashMap<String, (Vec<f64>, Vec<f64>, Vec<f64>)>, Box<dyn std::error::Error>> {
-    let contents = fs::read_to_string(path)?;
-    let mut bands: HashMap<String, (Vec<f64>, Vec<f64>, Vec<f64>)> = HashMap::new();
-    let mut mjd_min = f64::INFINITY;
-    let lines: Vec<_> = contents.lines().skip(1).collect();
-    
-    // Find mjd_min
-    for line in &lines {
-        let parts: Vec<&str> = line.split(',').collect();
-        if parts.len() >= 4 {
-            if let Ok(mjd) = parts[0].parse::<f64>() {
-                mjd_min = mjd_min.min(mjd);
-            }
-        }
-    }
-    
-    // First pass: deduplicate - keep only best (smallest error) observation per epoch
-    let mut epoch_best: HashMap<(String, u64), (f64, f64, f64)> = HashMap::new();
-    for line in &lines {
-        let parts: Vec<&str> = line.split(',').collect();
-        if parts.len() >= 4 {
-            let mjd: f64 = parts[0].parse()?;
-            let flux: f64 = parts[1].parse()?;
-            let flux_err: f64 = parts[2].parse()?;
-            let filter = parts[3].trim().to_string();
-            
-            if flux > 0.0 && flux_err > 0.0 {
-                let mjd_rounded = (mjd * 1e6).round() as u64;
-                let key = (filter, mjd_rounded);
-                
-                epoch_best.entry(key)
-                    .and_modify(|entry| {
-                        if flux_err < entry.2 {
-                            *entry = (flux, mjd, flux_err);
-                        }
-                    })
-                    .or_insert((flux, mjd, flux_err));
-            }
-        }
-    }
-    
-    // Second pass: identify bulk detection time and remove spurious early detections
-    let mut all_times: Vec<f64> = epoch_best.values().map(|(_, mjd, _)| *mjd).collect();
-    all_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    
-    let bulk_start = if all_times.len() > 0 {
-        let median_time = all_times[all_times.len() / 2];
-        median_time - 50.0
-    } else {
-        mjd_min
-    };
-    
-    // Third pass: build bands with deduplicated, cleaned data
-    for ((filter, _), (flux, mjd, flux_err)) in epoch_best.iter() {
-        if mjd < &bulk_start {
-            continue;
-        }
-        
-        let t = mjd - mjd_min;
-        let entry = bands.entry(filter.clone()).or_insert_with(|| (Vec::new(), Vec::new(), Vec::new()));
-        entry.0.push(t);
-        entry.1.push(*flux);
-        entry.2.push(*flux_err);
-    }
-    
-    Ok(bands)
+    let bands = read_ztf_lightcurve(path)?;
+    let result = bands
+        .into_iter()
+        .map(|(filter, bd)| (filter, (bd.times, bd.mags, bd.errors)))
+        .collect();
+    Ok(result)
 }
-
 struct BandPlot {
     times_obs: Vec<f64>,
     mags_obs: Vec<f64>,
@@ -382,6 +325,7 @@ struct BandPlot {
     chi2: f64,
     legend_label: String,
 }
+
 
 struct RefFit {
     params: Vec<f64>,

@@ -19,6 +19,11 @@ egobox-gp = "0.24"
 linfa = "0.7"
 ndarray = "0.15"
 
+# sklears / scirs dependencies for alternative GP backend
+sklears-gaussian-process = "0.1.0-beta.1"
+sklears-core = "0.1.0-beta.1"
+scirs2-core = "0.1.1"
+
 [[bin]]
 name = "fit_villar_nelder_mead"
 path = "src/bin/fit_villar_nelder_mead.rs"
