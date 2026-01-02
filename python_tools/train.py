@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import os
-import xgboost as xgb
+import lightgbm as lgb
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.metrics import classification_report, accuracy_score
 from sklearn.ensemble import IsolationForest
@@ -59,8 +59,8 @@ if par_ml is None and non_ml is None:
     print("Error: No parameter files found!")
     exit(1)
 
-# ------------------ XGBoost trainer with hyperparameter tuning ------------------
-def train_xgb(df, name):
+# ------------------ LightGBM trainer with hyperparameter tuning ------------------
+def train_lgb(df, name):
     if df is None:
         print(f"Skipping {name} - no data available")
         return None, None
@@ -107,21 +107,25 @@ def train_xgb(df, name):
     
     # Hyperparameter tuning with GridSearchCV
     print("\nPerforming hyperparameter tuning...")
+    print("This may take a few minutes...")
     
     param_grid = {
-        'n_estimators': [300, 500],
-        'max_depth': [4, 6, 8],
-        'learning_rate': [0.01, 0.03, 0.05],
-        'subsample': [0.8],
-        'colsample_bytree': [0.8]
+        'num_leaves': [31, 63],
+        'learning_rate': [0.05, 0.1],
+        'max_depth': [6, 8],
+        'n_estimators': [100, 200]
     }
     
-    base_model = xgb.XGBClassifier(
-        objective="multi:softprob",
-        eval_metric="mlogloss",
-        tree_method="hist",
-        n_jobs=-1,
-        random_state=42
+    print(f"Grid search will test {2*2*2*2} parameter combinations with {min(3, min_class_count)}-fold CV...")
+    
+    base_model = lgb.LGBMClassifier(
+        objective="multiclass",
+        metric="multi_logloss",
+        num_class=y.nunique(),
+        boosting_type='gbdt',
+        verbose=-1,
+        random_state=42,
+        n_jobs=4  # Limit to 4 jobs to see progress
     )
     
     grid_search = GridSearchCV(
@@ -129,8 +133,8 @@ def train_xgb(df, name):
         param_grid=param_grid,
         cv=min(3, min_class_count),  # Use 3-fold CV or fewer if classes are sparse
         scoring='accuracy',
-        n_jobs=-1,
-        verbose=1
+        n_jobs=1,  # Sequential to show progress
+        verbose=3  # Maximum verbosity
     )
     
     grid_search.fit(X_train, y_train)
@@ -153,30 +157,30 @@ def train_xgb(df, name):
     print(classification_report(y_test, y_pred, zero_division=0))
     
     # Save model
-    with open(f"{name}_xgb.pkl", "wb") as f:
+    with open(f"{name}_lgb.pkl", "wb") as f:
         pickle.dump(model, f)
-    print(f"✓ Model saved to {name}_xgb.pkl")
+    print(f"✓ Model saved to {name}_lgb.pkl")
     
     # Save feature importance
     feature_importance = pd.DataFrame({
         'feature': X.columns,
         'importance': model.feature_importances_
     }).sort_values('importance', ascending=False)
-    feature_importance.to_csv(f"{name}_feature_importance.csv", index=False)
-    print(f"✓ Feature importance saved to {name}_feature_importance.csv")
+    feature_importance.to_csv(f"{name}_feature_importance_lgb.csv", index=False)
+    print(f"✓ Feature importance saved to {name}_feature_importance_lgb.csv")
     
     return model, X
 
 # Train models
 print("\n" + "="*60)
-print("TRAINING PARAMETRIC CLASSIFIER")
+print("TRAINING PARAMETRIC CLASSIFIER (LightGBM)")
 print("="*60)
-par_model, par_X = train_xgb(par_ml, "parametric")
+par_model, par_X = train_lgb(par_ml, "parametric")
 
 print("\n" + "="*60)
-print("TRAINING NONPARAMETRIC CLASSIFIER")
+print("TRAINING NONPARAMETRIC CLASSIFIER (LightGBM)")
 print("="*60)
-non_model, non_X = train_xgb(non_ml, "nonparametric")
+non_model, non_X = train_lgb(non_ml, "nonparametric")
 
 # ------------------ UMAP Projection ------------------
 def do_umap(X, df, name):
@@ -195,7 +199,7 @@ def do_umap(X, df, name):
     
     emb_df = pd.DataFrame(emb, columns=["UMAP1", "UMAP2"])
     emb_df["classification"] = df["classification"].values
-    emb_df.to_csv(f"{name}_umap.csv", index=False)
+    emb_df.to_csv(f"{name}_umap_lgb.csv", index=False)
     
     plt.figure(figsize=(10, 8))
     for cls in emb_df["classification"].unique():
@@ -205,12 +209,12 @@ def do_umap(X, df, name):
     
     plt.xlabel("UMAP1", fontsize=14)
     plt.ylabel("UMAP2", fontsize=14)
-    plt.title(f"{name.capitalize()} UMAP Projection", fontsize=16)
+    plt.title(f"{name.capitalize()} UMAP Projection (LightGBM)", fontsize=16)
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
     plt.tight_layout()
-    plt.savefig(f"{name}_umap.png", dpi=200, bbox_inches='tight')
+    plt.savefig(f"{name}_umap_lgb.png", dpi=200, bbox_inches='tight')
     plt.close()
-    print(f"✓ UMAP plot saved to {name}_umap.png")
+    print(f"✓ UMAP plot saved to {name}_umap_lgb.png")
     return emb
 
 par_emb = do_umap(par_X, par_ml, "parametric")
@@ -230,8 +234,8 @@ def find_outliers(emb, df, name):
     df_out["anomaly"] = scores
     
     anomalies = df_out[df_out["anomaly"] == -1][["object", "classification"]]
-    anomalies.to_csv(f"{name}_anomalies.csv", index=False)
-    print(f"✓ Found {len(anomalies)} anomalies, saved to {name}_anomalies.csv")
+    anomalies.to_csv(f"{name}_anomalies_lgb.csv", index=False)
+    print(f"✓ Found {len(anomalies)} anomalies, saved to {name}_anomalies_lgb.csv")
 
 find_outliers(par_emb, par_ml, "parametric")
 find_outliers(non_emb, non_ml, "nonparametric")
