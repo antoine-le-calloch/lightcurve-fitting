@@ -18,6 +18,7 @@ enum ModelVariant {
     DecayOnly,
     FastDecay,
     PowerLaw,
+    Bazin,
 }
 
 #[derive(Clone, Debug)]
@@ -88,6 +89,34 @@ impl CostFunction for SingleBandVillarCost {
                 let sigma_penalty = (sigma_extra / 0.1).powi(2);
                 Ok(total_chi2 / n.max(1) as f64 + penalty + sigma_penalty)
             }
+            ModelVariant::Bazin => {
+                // Bazin: [log_a, b, t0, log_tau_rise, log_tau_fall]
+                let a = p[0].exp();
+                let b = p[1];
+                let t0 = p[2];
+                let tau_rise = p[3].exp();
+                let tau_fall = p[4].exp();
+
+                if !a.is_finite() || !tau_rise.is_finite() || !tau_fall.is_finite() {
+                    return Ok(1e99);
+                }
+
+                let mut total_chi2 = 0.0;
+                let mut n = 0usize;
+                for i in 0..self.band.times.len() {
+                    let model = bazin_flux(a, b, t0, tau_rise, tau_fall, self.band.times[i]);
+                    let diff = model - self.band.flux[i];
+                    let var = self.band.flux_err[i].powi(2) + 1e-10;
+                    total_chi2 += diff * diff / var;
+                    n += 1;
+                }
+                let penalty = if t0 < -100.0 || t0 > 100.0 || tau_rise < 1e-6 || tau_rise > 1e4 || tau_fall < 1e-6 || tau_fall > 1e4 {
+                    1e6
+                } else {
+                    0.0
+                };
+                Ok(total_chi2 / n.max(1) as f64 + penalty)
+            }
             _ => {
                 let a = p[0].exp();
                 let beta = p[1];
@@ -107,7 +136,7 @@ impl CostFunction for SingleBandVillarCost {
                     let model = match self.variant {
                         ModelVariant::Full => villar_flux(a, beta, gamma, t0, tau_rise, tau_fall, self.band.times[i]),
                         ModelVariant::DecayOnly | ModelVariant::FastDecay => villar_flux_decay(a, beta, gamma, t0, tau_fall, self.band.times[i]),
-                        ModelVariant::PowerLaw => unreachable!(),
+                        ModelVariant::PowerLaw | ModelVariant::Bazin => unreachable!(),
                     };
                     let diff = model - self.band.flux[i];
                     // Use only observational errors in chi2, not sigma_extra
@@ -129,6 +158,12 @@ impl CostFunction for SingleBandVillarCost {
 }
 
 fn pso_bounds(base: Option<&[f64]>, variant: ModelVariant) -> (Vec<f64>, Vec<f64>) {
+    if matches!(variant, ModelVariant::Bazin) {
+        // Bazin model: [a, b (baseline), t0, tau_rise, tau_fall]
+        let lower = vec![-0.3, -1.0, -100.0, 1e-8, 1e-8];
+        let upper = vec![0.5, 1.0, 30.0, 3.5, 3.5];
+        return (lower, upper);
+    }
     if matches!(variant, ModelVariant::PowerLaw) {
         let mut lower = vec![-0.5, 0.5, -10.0, -4.0];
         let mut upper = vec![0.8, 4.0, 30.0, -1.5];
@@ -190,6 +225,13 @@ pub fn powerlaw_flux(a: f64, alpha: f64, t0: f64, t: f64) -> f64 {
     } else {
         a * phase.powf(-alpha)
     }
+}
+
+pub fn bazin_flux(a: f64, b: f64, t0: f64, tau_rise: f64, tau_fall: f64, t: f64) -> f64 {
+    let dt = t - t0;
+    let num = (-(dt) / tau_fall).exp();
+    let den = 1.0 + (-(dt) / tau_rise).exp();
+    a * (num / den) + b
 }
 
 fn flux_to_mag(flux: f64) -> f64 {
@@ -355,7 +397,7 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
     let try_variants = if let Some(forced) = force_variant {
         vec![forced]
     } else {
-        vec![ModelVariant::Full, ModelVariant::FastDecay, ModelVariant::PowerLaw]
+        vec![ModelVariant::Full, ModelVariant::FastDecay, ModelVariant::PowerLaw, ModelVariant::Bazin]
     };
 
     let (params_full, chi2_full) = if try_variants.contains(&ModelVariant::Full) {
@@ -379,10 +421,18 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
         (vec![], f64::INFINITY)
     };
 
+    let (params_bazin, chi2_bazin) = if try_variants.contains(&ModelVariant::Bazin) {
+        let base = if use_ref_variant { Some(ref_fit.unwrap().params.as_slice()) } else { None };
+        run_fit(base, ModelVariant::Bazin, 100, 60)
+    } else {
+        (vec![], f64::INFINITY)
+    };
+
     let (params, variant, chi2_best) = {
         let mut best = (params_full, ModelVariant::Full, chi2_full);
         if chi2_fast < best.2 { best = (params_fast, ModelVariant::FastDecay, chi2_fast); }
         if chi2_power < best.2 { best = (params_power, ModelVariant::PowerLaw, chi2_power); }
+        if chi2_bazin < best.2 { best = (params_bazin, ModelVariant::Bazin, chi2_bazin); }
         best
     };
 
@@ -409,6 +459,7 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
 
     let sigma_extra = match variant {
         ModelVariant::PowerLaw => params[3].exp(),
+        ModelVariant::Bazin => 0.0,  // Bazin has no sigma_extra parameter
         _ => params[6].exp(),
     };
 
@@ -432,6 +483,13 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
             let alpha = params[1];
             let t0 = params[2];
             format!("PL t0={:.2}, alpha={:.3}", t0, alpha)
+        }
+        ModelVariant::Bazin => {
+            let b = params[1];
+            let t0 = params[2];
+            let tau_rise = params[3].exp();
+            let tau_fall = params[4].exp();
+            format!("Bazin t0={:.2}, tr={:.2}, tf={:.2}, b={:.3}", t0, tau_rise, tau_fall, b)
         }
     };
 
@@ -459,6 +517,14 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
                 let alpha = params[1];
                 let t0 = params[2];
                 powerlaw_flux(a, alpha, t0, t)
+            }
+            ModelVariant::Bazin => {
+                let a = params[0].exp();
+                let b = params[1];
+                let t0 = params[2];
+                let tau_rise = params[3].exp();
+                let tau_fall = params[4].exp();
+                bazin_flux(a, b, t0, tau_rise, tau_fall, t)
             }
         }
     };
@@ -510,6 +576,12 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
         ModelVariant::PowerLaw => {
             let t0 = params[2];
             (f64::NAN, f64::NAN, t0)  // No rise/decay times for power-law
+        }
+        ModelVariant::Bazin => {
+            let tau_rise = params[3].exp();
+            let tau_fall = params[4].exp();
+            let t0 = params[2];
+            (tau_rise, tau_fall, t0)
         }
     };
     
@@ -652,6 +724,8 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
                 ModelVariant::Full
             } else if variant_str.contains("PowerLaw") {
                 ModelVariant::PowerLaw
+            } else if variant_str.contains("Bazin") {
+                ModelVariant::Bazin
             } else {
                 ModelVariant::FastDecay
             };
@@ -661,11 +735,9 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
             });
         }
 
-        // Only save timescale params for the first (most data) band
-        if i == 0 {
-            timescale_params.band = band_name.clone();
-            timescale_params_all.push(timescale_params.clone());
-        }
+        // Save timescale params for all bands (they all use same variant after first)
+        timescale_params.band = band_name.clone();
+        timescale_params_all.push(timescale_params.clone());
 
         let legend_label = format!("{} ({}; chi2={:.2}; N={})", band_name, param_summary, chi2, fit_data.times.len());
 
