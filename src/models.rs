@@ -158,6 +158,10 @@ pub struct PhotometryMag {
     pub mag: f32,
     #[serde(alias = "sigmapsf")]
     pub mag_err: f32,
+    #[serde(alias = "isdiffpos", deserialize_with = "deserialize_isdiffpos")]
+    pub isdiffpos: bool,
+    #[serde(alias = "diffmaglim")]
+    pub mag_limit: f32,
     pub band: Band,
 }
 
