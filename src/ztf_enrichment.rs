@@ -28,6 +28,7 @@ pub struct ZtfAlertProperties {
 
 pub fn get_alert_properties(alert: &ZtfAlertForEnrichment) -> (
         ZtfAlertProperties,
+        ZtfAlertProperties,
         AllBandsProperties,
         i32,
         Vec<PhotometryMag>
@@ -79,9 +80,60 @@ pub fn get_alert_properties(alert: &ZtfAlertForEnrichment) -> (
 
     // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
     let mut lightcurve = [prv_candidates, fp_hists].concat();
+    let mut lightcurve_ul = lightcurve.clone();
+
+    lightcurve = lightcurve.into_iter().filter(|p| p.isdiffpos == true).collect();
+    lightcurve_ul = lightcurve_ul.into_iter().filter(|p| p.isdiffpos == false).collect();
+
+    // Find first and last detection times per band
+    let mut ul_to_keep = Vec::new();
+    
+    // Get unique bands from detections
+    let bands: std::collections::HashSet<_> = lightcurve.iter().map(|p| p.band.clone()).collect();
+    
+    for band in bands {
+        // Get detections for this band
+        let band_detections: Vec<_> = lightcurve.iter().filter(|p| p.band == band).collect();
+        
+        if let (Some(first_det), Some(last_det)) = (
+            band_detections.iter().map(|p| p.time).min_by(|a, b| a.partial_cmp(b).unwrap()),
+            band_detections.iter().map(|p| p.time).max_by(|a, b| a.partial_cmp(b).unwrap())
+        ) {
+            // Find last upper limit before first detection for this band
+            if let Some(last_ul_before) = lightcurve_ul.iter()
+                .filter(|p| p.band == band && p.time < first_det)
+                .max_by(|a, b| a.time.partial_cmp(&b.time).unwrap())
+            {
+                ul_to_keep.push(last_ul_before.clone());
+            }
+            
+            // Find first upper limit after last detection for this band
+            if let Some(first_ul_after) = lightcurve_ul.iter()
+                .filter(|p| p.band == band && p.time > last_det)
+                .min_by(|a, b| a.time.partial_cmp(&b.time).unwrap())
+            {
+                ul_to_keep.push(first_ul_after.clone());
+            }
+        }
+    }
+    
+    lightcurve_ul = ul_to_keep;
+
+    for p in lightcurve_ul.iter_mut() {
+        p.mag = p.mag_limit;
+        p.mag_err = 0.2;
+    }
+
+    // Combine detections with filtered upper limits
+    lightcurve_ul = [lightcurve.clone(), lightcurve_ul].concat();
+
+    println!("Total detections: {}, Total ul points: {}", lightcurve.len(), lightcurve_ul.len());
 
     prepare_photometry(&mut lightcurve);
     let (photstats, all_bands_properties, stationary) = analyze_photometry(&lightcurve);
+
+    prepare_photometry(&mut lightcurve_ul);
+    let (photstats_ul, all_bands_properties_ul, stationary_ul) = analyze_photometry(&lightcurve_ul);
 
     (
         ZtfAlertProperties {
@@ -90,6 +142,13 @@ pub fn get_alert_properties(alert: &ZtfAlertForEnrichment) -> (
             near_brightstar: is_near_brightstar,
             stationary,
             photstats,
+        },
+        ZtfAlertProperties {
+            rock: is_rock,
+            star: is_star,
+            near_brightstar: is_near_brightstar,
+            stationary: stationary_ul,
+            photstats: photstats_ul,
         },
         all_bands_properties,
         programid,
