@@ -1,0 +1,6 @@
+README.md
+pyproject.toml
+src/lightcurve_fitting.egg-info/PKG-INFO
+src/lightcurve_fitting.egg-info/SOURCES.txt
+src/lightcurve_fitting.egg-info/dependency_links.txt
+src/lightcurve_fitting.egg-info/top_level.txt

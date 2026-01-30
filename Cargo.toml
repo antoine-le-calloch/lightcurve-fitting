@@ -23,27 +23,29 @@ ndarray = "0.15"
 sklears-gaussian-process = "0.1.0-beta.1"
 sklears-core = "0.1.0-beta.1"
 scirs2-core = "0.1.1"
+csv = "1.4.0"
+lightgbm3 = "1.0.10"
 
-[[bin]]
-name = "fit_villar_nelder_mead"
-path = "src/bin/fit_villar_nelder_mead.rs"
-
-[[bin]]
-name = "fit_villar_lbfgsb"
-path = "src/bin/fit_villar_lbfgsb.rs"
-
-[[bin]]
-name = "fit_villar_lbfgsb_analytical"
-path = "src/bin/fit_villar_lbfgsb_analytical.rs"
-
-[[bin]]
-name = "fit_villar_lbfgsb_test"
-path = "src/bin/fit_villar_lbfgsb_test.rs"
-
-[[bin]]
-name = "fit_villar_ego"
-path = "src/bin/fit_villar_ego.rs"
-
-[[bin]]
-name = "plot_ztf_temperature_egobox"
-path = "src/bin/plot_ztf_temperature_egobox.rs"
+#[[bin]]
+#name = "fit_villar_nelder_mead"
+#path = "src/bin/fit_villar_nelder_mead.rs"
+#
+#[[bin]]
+#name = "fit_villar_lbfgsb"
+#path = "src/bin/fit_villar_lbfgsb.rs"
+#
+#[[bin]]
+#name = "fit_villar_lbfgsb_analytical"
+#path = "src/bin/fit_villar_lbfgsb_analytical.rs"
+#
+#[[bin]]
+#name = "fit_villar_lbfgsb_test"
+#path = "src/bin/fit_villar_lbfgsb_test.rs"
+#
+#[[bin]]
+#name = "fit_villar_ego"
+#path = "src/bin/fit_villar_ego.rs"
+#
+#[[bin]]
+#name = "plot_ztf_temperature_egobox"
+#path = "src/bin/plot_ztf_temperature_egobox.rs"
