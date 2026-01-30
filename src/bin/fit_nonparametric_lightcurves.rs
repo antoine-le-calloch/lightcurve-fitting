@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 use std::f64::consts::LN_10;
 use std::time::Instant;
-use lightcurve_fiting::lightcurve_common::{BandData, read_ztf_lightcurve, median, extract_rise_timescale, extract_decay_timescale, compute_fwhm, compute_rise_rate, compute_decay_rate};
+use lightcurve_fiting::lightcurve_common::{read_ztf_lightcurve, median, extract_rise_timescale, extract_decay_timescale, compute_fwhm, compute_rise_rate, compute_decay_rate};
 struct FastGP {
     lengthscale: f64,
 }
@@ -415,7 +415,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
     let mut total_fit_time = 0.0;
     
     // Find the band with the most data points and only fit that one
-    let band_to_fit = bands.iter()
+    let _band_to_fit = bands.iter()
         .max_by_key(|(_, band_data)| band_data.times.len())
         .map(|(name, _)| name.clone());
     

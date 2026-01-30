@@ -7,7 +7,7 @@ use argmin::core::{CostFunction, Error as ArgminError, Executor, State};
 use argmin::solver::particleswarm::ParticleSwarm;
 use plotters::prelude::*;
 
-use lightcurve_fiting::lightcurve_common::{BandData, read_ztf_lightcurve};
+use lightcurve_fiting::lightcurve_common::read_ztf_lightcurve;
 
 // Zeropoint consistent with GP plotter
 const ZP: f64 = 23.9;

@@ -1,4 +1,4 @@
-use scirs2_core::ndarray::{Array1, Array2, Axis};
+use scirs2_core::ndarray::{Array1, Axis};
 use sklears_gaussian_process::{
     GaussianProcessRegressor, GprTrained,
     kernels::{ConstantKernel, RBF, WhiteKernel, ProductKernel, SumKernel},
@@ -10,7 +10,7 @@ use std::fs;
 use std::path::Path;
 use std::f64::consts::LN_10;
 use std::time::Instant;
-use lightcurve_fiting::lightcurve_common::{BandData, read_ztf_lightcurve, median, extract_rise_timescale, extract_decay_timescale, compute_fwhm, compute_rise_rate, compute_decay_rate};
+use lightcurve_fiting::lightcurve_common::{read_ztf_lightcurve, median, extract_rise_timescale, extract_decay_timescale, compute_fwhm, compute_rise_rate, compute_decay_rate};
 
 struct FastGP {
     base: GaussianProcessRegressor<Untrained>,
