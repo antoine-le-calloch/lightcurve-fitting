@@ -1,7 +1,11 @@
 import json
+import argparse
 import matplotlib.pyplot as plt
 
-file_to_plot = "../candidates/ZTF25abmpngy.json"
+parser = argparse.ArgumentParser(description="file to plot")
+parser.add_argument("-file", type=str)
+
+file_to_plot = f"{parser.parse_args().file}"
 
 if __name__ == "__main__":
     with open(file_to_plot, "r") as file:
@@ -29,7 +33,7 @@ if __name__ == "__main__":
         "y": "orange",
     }
 
-    plt.figure(figsize=(9,6))
+    plt.figure(figsize=(9, 6))
 
     # --- Plot band by band ---
     for b in unique_bands:

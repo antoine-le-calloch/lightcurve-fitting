@@ -197,8 +197,7 @@ pub struct BandProperties {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
-pub struct PerBandProperties {
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)] pub struct PerBandProperties {
     pub g: Option<BandProperties>,
     pub r: Option<BandProperties>,
     pub i: Option<BandProperties>,
