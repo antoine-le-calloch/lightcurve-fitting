@@ -2,12 +2,14 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
+// use rayon::prelude::*;
 
 use argmin::core::{CostFunction, Error as ArgminError, Executor, State};
 use argmin::solver::particleswarm::ParticleSwarm;
 use plotters::prelude::*;
 
 use lightcurve_fiting::lightcurve_common::read_ztf_lightcurve;
+use sklears_core::plugin::testing_prelude;
 
 // Zeropoint consistent with GP plotter
 const ZP: f64 = 23.9;
@@ -46,6 +48,8 @@ struct BandFitData {
     flux_err: Vec<f64>,
     noise_frac_median: f64,
     peak_flux_obs: f64,
+    // Precompute weights outside of cost loop
+    weights: Vec<f64>
 }
 
 #[derive(Clone)]
@@ -62,96 +66,95 @@ impl CostFunction for SingleBandVillarCost {
         match self.variant {
             ModelVariant::PowerLaw => {
                 let a = p[0].exp();
-                let alpha = p[1];
-                let t0 = p[2];
                 let sigma_extra = p[3].exp();
 
                 if !a.is_finite() || !sigma_extra.is_finite() {
                     return Ok(1e99);
                 }
 
-                let mut total_chi2 = 0.0;
-                let mut n = 0usize;
-                for i in 0..self.band.times.len() {
-                    let model = powerlaw_flux(a, alpha, t0, self.band.times[i]);
-                    let diff = model - self.band.flux[i];
-                    // Use only observational errors in chi2, not sigma_extra
-                    let var = self.band.flux_err[i].powi(2) + 1e-10;
-                    total_chi2 += diff * diff / var;
-                    n += 1;
-                }
-                let penalty = if t0 < -100.0 || t0 > 50.0 || alpha < 0.0 || alpha > 5.0 {
-                    1e6
-                } else {
-                    0.0
-                };
-                // Add penalty for large sigma_extra to prevent overfitting
+                let alpha = p[1];
+                let t0 = p[2];
                 let sigma_penalty = (sigma_extra / 0.1).powi(2);
-                Ok(total_chi2 / n.max(1) as f64 + penalty + sigma_penalty)
+
+                // move this up here under the assumption total_chi2 << 1e6
+                if t0 < -100.0 || t0 > 50.0 || alpha < 0.0 || alpha > 5.0 {
+                    return Ok(1e6 + sigma_penalty);
+                }
+
+                let mut total_chi2 = 0.0;
+                for ((&time, &flux), &weight) in self.band.times.iter().zip(&self.band.flux).zip(&self.band.weights) {
+                    let model = powerlaw_flux(a, alpha, t0, time);
+                    let diff = model - flux;
+                    // Use only observational errors in chi2, not sigma_extra
+                    total_chi2 += diff * diff * weight;
+                    
+                }
+
+                let n = self.band.times.len().max(1) as f64;
+                // Add penalty for large sigma_extra to prevent overfitting
+                Ok(total_chi2 / n + sigma_penalty)
             }
+
             ModelVariant::Bazin => {
                 // Bazin: [log_a, b, t0, log_tau_rise, log_tau_fall]
                 let a = p[0].exp();
-                let b = p[1];
-                let t0 = p[2];
-                let tau_rise = p[3].exp();
-                let tau_fall = p[4].exp();
+                let inv_tau_rise = 1.0 / p[3].exp();
+                let inv_tau_fall = 1.0 / p[4].exp();
 
-                if !a.is_finite() || !tau_rise.is_finite() || !tau_fall.is_finite() {
+                if !a.is_finite() || !inv_tau_rise.is_finite() || !inv_tau_fall.is_finite() {
                     return Ok(1e99);
                 }
 
-                let mut total_chi2 = 0.0;
-                let mut n = 0usize;
-                for i in 0..self.band.times.len() {
-                    let model = bazin_flux(a, b, t0, tau_rise, tau_fall, self.band.times[i]);
-                    let diff = model - self.band.flux[i];
-                    let var = self.band.flux_err[i].powi(2) + 1e-10;
-                    total_chi2 += diff * diff / var;
-                    n += 1;
+                let b = p[1];
+                let t0 = p[2];
+
+                if t0 < -100.0 || t0 > 100.0 || inv_tau_rise > 1e6 || inv_tau_rise < 1e-4 || inv_tau_fall > 1e6 || inv_tau_fall < 1e-4 {
+                    return Ok(1e6)
                 }
-                let penalty = if t0 < -100.0 || t0 > 100.0 || tau_rise < 1e-6 || tau_rise > 1e4 || tau_fall < 1e-6 || tau_fall > 1e4 {
-                    1e6
-                } else {
-                    0.0
-                };
-                Ok(total_chi2 / n.max(1) as f64 + penalty)
+
+                let mut total_chi2 = 0.0;
+                for ((&time, &flux), &weight) in self.band.times.iter().zip(&self.band.flux).zip(&self.band.weights) {
+                    let model = bazin_flux(a, b, t0, inv_tau_rise, inv_tau_fall, time);
+                    let diff = model - flux;
+                    total_chi2 += diff * diff * weight;
+                }
+
+                let n = self.band.times.len().max(1) as f64;
+                Ok(total_chi2 / n)
             }
             _ => {
                 let a = p[0].exp();
-                let beta = p[1];
                 let gamma = p[2].exp();
-                let t0 = p[3];
-                let tau_rise = p[4].exp();
-                let tau_fall = p[5].exp();
+                let inv_tau_rise = 1.0 / p[4].exp();
+                let inv_tau_fall = 1.0 / p[5].exp();
                 let sigma_extra = p[6].exp();
 
-                if !a.is_finite() || !gamma.is_finite() || !tau_rise.is_finite() || !tau_fall.is_finite() || !sigma_extra.is_finite() {
+                if !a.is_finite() || !gamma.is_finite() || !inv_tau_rise.is_finite() || !inv_tau_fall.is_finite() || !sigma_extra.is_finite() {
                     return Ok(1e99);
                 }
 
+                let t0 = p[3];
+
+                if t0 < -100.0 || t0 > 100.0 || inv_tau_rise > 1e6 || inv_tau_rise < 1e-4 || inv_tau_fall > 1e6 || inv_tau_fall < 1e-4 {
+                    return Ok(1e6)
+                }
+
+                let beta = p[1];
                 let mut total_chi2 = 0.0;
-                let mut n = 0usize;
-                for i in 0..self.band.times.len() {
+                for ((&time, &flux), &weight) in self.band.times.iter().zip(&self.band.flux).zip(&self.band.weights) {
                     let model = match self.variant {
-                        ModelVariant::Full => villar_flux(a, beta, gamma, t0, tau_rise, tau_fall, self.band.times[i]),
-                        ModelVariant::DecayOnly | ModelVariant::FastDecay => villar_flux_decay(a, beta, gamma, t0, tau_fall, self.band.times[i]),
+                        ModelVariant::Full => villar_flux(a, beta, gamma, t0, inv_tau_rise, inv_tau_fall, time),
+                        ModelVariant::DecayOnly | ModelVariant::FastDecay => villar_flux_decay(a, beta, gamma, t0, inv_tau_fall, time),
                         ModelVariant::PowerLaw | ModelVariant::Bazin => unreachable!(),
                     };
-                    let diff = model - self.band.flux[i];
-                    // Use only observational errors in chi2, not sigma_extra
-                    let var = self.band.flux_err[i].powi(2) + 1e-10;
-                    total_chi2 += diff * diff / var;
-                    n += 1;
+                    let diff = model - flux;
+                    total_chi2 += diff * diff * weight;
                 }
-                let penalty = if t0 < -100.0 || t0 > 100.0 || tau_rise < 1e-6 || tau_rise > 1e4 || tau_fall < 1e-6 || tau_fall > 1e4 {
-                    1e6
-                } else {
-                    0.0
-                };
+
                 // Add penalty for large sigma_extra to prevent overfitting
                 let sigma_penalty = (sigma_extra / 0.1).powi(2);
-                Ok(total_chi2 / n.max(1) as f64 + penalty + sigma_penalty)
+                let n = self.band.times.len().max(1) as f64;
+                Ok(total_chi2 / n + sigma_penalty)
             }
         }
     }
@@ -195,27 +198,30 @@ fn pso_bounds(base: Option<&[f64]>, variant: ModelVariant) -> (Vec<f64>, Vec<f64
     (lower, upper)
 }
 
-pub fn villar_flux(a: f64, beta: f64, gamma: f64, t0: f64, tau_rise: f64, tau_fall: f64, t: f64) -> f64 {
+#[inline]
+pub fn villar_flux(a: f64, beta: f64, gamma: f64, t0: f64, inv_tau_rise: f64, inv_tau_fall: f64, t: f64) -> f64 {
     let phase = t - t0;
-    let sigmoid = 1.0 / (1.0 + (-phase / tau_rise).exp());
+    let sigmoid = 1.0 / (1.0 + (-phase * inv_tau_rise).exp());
     let piece = if phase < gamma {
         1.0 - beta * phase
     } else {
-        (1.0 - beta * gamma) * ((gamma - phase) / tau_fall).exp()
+        (1.0 - beta * gamma) * ((gamma - phase) * inv_tau_fall).exp()
     };
     a * sigmoid * piece
 }
 
-pub fn villar_flux_decay(a: f64, beta: f64, gamma: f64, t0: f64, tau_fall: f64, t: f64) -> f64 {
+#[inline]
+pub fn villar_flux_decay(a: f64, beta: f64, gamma: f64, t0: f64, inv_tau_fall: f64, t: f64) -> f64 {
     let phase = t - t0;
     let piece = if phase < gamma {
         1.0 - beta * phase
     } else {
-        (1.0 - beta * gamma) * ((gamma - phase) / tau_fall).exp()
+        (1.0 - beta * gamma) * ((gamma - phase) * inv_tau_fall).exp()
     };
     a * piece
 }
 
+#[inline]
 pub fn powerlaw_flux(a: f64, alpha: f64, t0: f64, t: f64) -> f64 {
     let phase = t - t0;
     // Power law should apply for all observed times (phase > 0)
@@ -227,13 +233,15 @@ pub fn powerlaw_flux(a: f64, alpha: f64, t0: f64, t: f64) -> f64 {
     }
 }
 
-pub fn bazin_flux(a: f64, b: f64, t0: f64, tau_rise: f64, tau_fall: f64, t: f64) -> f64 {
+#[inline]
+pub fn bazin_flux(a: f64, b: f64, t0: f64, inv_tau_rise: f64, inv_tau_fall: f64, t: f64) -> f64 {
     let dt = t - t0;
-    let num = (-(dt) / tau_fall).exp();
-    let den = 1.0 + (-(dt) / tau_rise).exp();
+    let num = (-(dt) * inv_tau_fall).exp();
+    let den = 1.0 + (-(dt) * inv_tau_rise).exp();
     a * (num / den) + b
 }
 
+#[inline]
 fn flux_to_mag(flux: f64) -> f64 {
     -2.5 * flux.log10() + ZP
 }
@@ -500,17 +508,17 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
                 let beta = params[1];
                 let gamma = params[2].exp();
                 let t0 = params[3];
-                let tau_rise = params[4].exp();
-                let tau_fall = params[5].exp();
-                villar_flux(a, beta, gamma, t0, tau_rise, tau_fall, t)
+                let inv_tau_rise = 1.0 / params[4].exp();
+                let inv_tau_fall = 1.0 / params[5].exp();
+                villar_flux(a, beta, gamma, t0, inv_tau_rise, inv_tau_fall, t)
             }
             ModelVariant::DecayOnly | ModelVariant::FastDecay => {
                 let a = params[0].exp();
                 let beta = params[1];
                 let gamma = params[2].exp();
                 let t0 = params[3];
-                let tau_fall = params[5].exp();
-                villar_flux_decay(a, beta, gamma, t0, tau_fall, t)
+                let inv_tau_fall = 1.0 / params[5].exp();
+                villar_flux_decay(a, beta, gamma, t0, inv_tau_fall, t)
             }
             ModelVariant::PowerLaw => {
                 let a = params[0].exp();
@@ -522,9 +530,9 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
                 let a = params[0].exp();
                 let b = params[1];
                 let t0 = params[2];
-                let tau_rise = params[3].exp();
-                let tau_fall = params[4].exp();
-                bazin_flux(a, b, t0, tau_rise, tau_fall, t)
+                let inv_tau_rise = 1.0 / params[3].exp();
+                let inv_tau_fall = 1.0 / params[4].exp();
+                bazin_flux(a, b, t0, inv_tau_rise, inv_tau_fall, t)
             }
         }
     };
@@ -688,12 +696,15 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
             mags_obs.push(m);
         }
 
+        // Precompute weights outside of cost loop
+        let inverse_var_calculation: Vec<f64> = normalized_err.iter().map(|e| 1.0 / (e * e + 1e-10)).collect();
         let fit_data = BandFitData {
             times: times.clone(),
             flux: normalized_flux,
             flux_err: normalized_err,
             noise_frac_median,
             peak_flux_obs: peak_flux,
+            weights: inverse_var_calculation
         };
 
         band_data.push((band_name.clone(), fit_data, mags_obs));
@@ -955,6 +966,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut total_fit_time = 0.0;
     let mut all_params: Vec<VillarTimescaleParams> = Vec::new();
     
+    // let parallel_results: Vec<_> = targets.par_iter().map(|t| {(t, process_file(t, output_dir))}).collect();
+
+    // for (t, result) in parallel_results {
+    //     match result{
+    //             Ok((fit_time, params)) => {
+    //             total_fit_time += fit_time;
+    //             all_params.extend(params);
+    //         },
+    //     Err(e) => eprintln!("Error processing {}: {}", t, e),
+    //     }
+    // }
+
     for (idx, t) in targets.iter().enumerate() {
         println!("\n[{}/{}] Villar fitting {}", idx + 1, targets.len(), t);
         match process_file(t, output_dir) {

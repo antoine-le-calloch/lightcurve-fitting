@@ -1,3 +1,6 @@
 target
-
+lightcurves_csv
 candidates
+photometry.json
+classifications.csv
+parametric_plots
