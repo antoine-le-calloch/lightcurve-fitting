@@ -3,4 +3,5 @@ lightcurves_csv
 candidates
 photometry.json
 classifications.csv
-parametric_plotsparametric_timescale_parameters.csv
+parametric_timescale_parameters.csv
+parametric_plots
