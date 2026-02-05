@@ -934,10 +934,10 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
     // root.present()?;
     // println!("✓ Villar plot {}", output_path.display());
     
-    // // Store object name with band in all timescale params
-    // for param in &mut timescale_params_all {
-    //     param.band = format!("{}|{}", object_name, param.band);
-    // }
+    // Store object name with band in all timescale params
+    for param in &mut timescale_params_all {
+        param.band = format!("{}|{}", object_name, param.band);
+    }
     
     Ok((total_fit_time, timescale_params_all))
 }
