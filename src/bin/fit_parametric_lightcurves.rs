@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
-// use rayon::prelude::*;
+use rayon::prelude::*;
 
 use argmin::core::{CostFunction, Error as ArgminError, Executor, State};
 use argmin::solver::particleswarm::ParticleSwarm;
@@ -42,8 +42,8 @@ struct VillarTimescaleParams {
 }
 
 #[derive(Clone)]
-struct BandFitData {
-    times: Vec<f64>,
+struct BandFitData<'a> {
+    times: &'a [f64],
     flux: Vec<f64>,
     flux_err: Vec<f64>,
     noise_frac_median: f64,
@@ -53,12 +53,12 @@ struct BandFitData {
 }
 
 #[derive(Clone)]
-struct SingleBandVillarCost {
-    band: BandFitData,
+struct SingleBandVillarCost <'a>{
+    band: &'a BandFitData <'a>,
     variant: ModelVariant,
 }
 
-impl CostFunction for SingleBandVillarCost {
+impl <'a> CostFunction for SingleBandVillarCost <'a>{
     type Param = Vec<f64>;
     type Output = f64;
 
@@ -98,8 +98,8 @@ impl CostFunction for SingleBandVillarCost {
             ModelVariant::Bazin => {
                 // Bazin: [log_a, b, t0, log_tau_rise, log_tau_fall]
                 let a = p[0].exp();
-                let inv_tau_rise = 1.0 / p[3].exp();
-                let inv_tau_fall = 1.0 / p[4].exp();
+                let inv_tau_rise: f64 =1.0 / p[3].exp();
+                let inv_tau_fall: f64 =1.0 / p[4].exp();
 
                 if !a.is_finite() || !inv_tau_rise.is_finite() || !inv_tau_fall.is_finite() {
                     return Ok(1e99);
@@ -125,8 +125,8 @@ impl CostFunction for SingleBandVillarCost {
             _ => {
                 let a = p[0].exp();
                 let gamma = p[2].exp();
-                let inv_tau_rise = 1.0 / p[4].exp();
-                let inv_tau_fall = 1.0 / p[5].exp();
+                let inv_tau_rise: f64 =1.0 / p[4].exp();
+                let inv_tau_fall: f64 =1.0 / p[5].exp();
                 let sigma_extra = p[6].exp();
 
                 if !a.is_finite() || !gamma.is_finite() || !inv_tau_rise.is_finite() || !inv_tau_fall.is_finite() || !sigma_extra.is_finite() {
@@ -257,6 +257,15 @@ fn median(xs: &mut [f64]) -> Option<f64> {
     }
 }
 
+fn get_band_color(band: &str) -> RGBColor {
+    match band {
+        "g" | "ZTF_g" => BLUE,
+        "r" | "ZTF_r" => RED,
+        "i" | "ZTF_i" => GREEN,
+        _ => BLACK,
+    }
+}
+
 // Compute Full Width at Half Maximum (FWHM) in magnitude space
 // Finds the time span where magnitude is within 0.75 mag of peak (50% flux)
 fn compute_fwhm(times: &[f64], mags: &[f64]) -> (f64, f64, f64) {
@@ -265,7 +274,7 @@ fn compute_fwhm(times: &[f64], mags: &[f64]) -> (f64, f64, f64) {
     }
     
     // Find peak (minimum magnitude)
-    let peak_mag = mags.iter().cloned().fold(f64::INFINITY, f64::min);
+    let peak_mag = mags.iter().copied().fold(f64::INFINITY, f64::min);
     let half_max_mag = peak_mag + 0.75;  // 0.75 mag fainter = 50% flux
     
     // Find time before peak where mag crosses half maximum (going from faint to bright)
@@ -356,7 +365,7 @@ fn compute_decay_rate(times: &[f64], mags: &[f64]) -> f64 {
 
 // Adapter function to convert BandData to the tuple format used by parametric fitting
 // Parametric fitting needs flux values (not magnitudes), so we pass convert_to_mag=false
-fn read_lightcurve(path: &str) -> Result<HashMap<String, (Vec<f64>, Vec<f64>, Vec<f64>)>, Box<dyn std::error::Error>> {
+fn read_lightcurve(path: &str) -> Result<HashMap<String, (Vec<f64>, Vec<f64>, Vec<f64>)>, Box<dyn std::error::Error + Send + Sync>> {
     let bands = read_ztf_lightcurve(path, false)?;
     let result = bands
         .into_iter()
@@ -364,15 +373,15 @@ fn read_lightcurve(path: &str) -> Result<HashMap<String, (Vec<f64>, Vec<f64>, Ve
         .collect();
     Ok(result)
 }
-struct BandPlot {
-    times_obs: Vec<f64>,
-    mags_obs: Vec<f64>,
+struct BandPlot <'a> {
+    times_obs: &'a [f64],
+    mags_obs: &'a [f64],
     mag_errors: Vec<f64>,
-    times_pred: Vec<f64>,
+    times_pred: &'a [f64],
     mags_model: Vec<f64>,
     mags_upper: Vec<f64>,
     mags_lower: Vec<f64>,
-    label: String,
+    label: &'a String,
     chi2: f64,
     legend_label: String,
 }
@@ -387,13 +396,14 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
     let run_fit = |base: Option<&[f64]>, variant: ModelVariant, iters: u64, particles: usize| {
         let (lower, upper) = pso_bounds(base, variant);
         let solver = ParticleSwarm::new((lower, upper), particles);
-        let problem = SingleBandVillarCost { band: data.clone(), variant };
+        let problem = SingleBandVillarCost { band: data, variant };
         let res = Executor::new(problem, solver)
             .configure(|state| state.max_iters(iters))
             .run()
             .expect("PSO failed");
-        let best = res.state().get_best_param().unwrap();
-        let chi2 = res.state().get_cost();
+        let state = res.state();
+        let best = state.get_best_param().unwrap();
+        let chi2 = state.get_cost();
         (best.position.clone(), chi2)
     };
 
@@ -501,43 +511,47 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
         }
     };
 
-    let eval_model = |t: f64| -> f64 {
-        match variant {
-            ModelVariant::Full => {
-                let a = params[0].exp();
-                let beta = params[1];
-                let gamma = params[2].exp();
-                let t0 = params[3];
-                let inv_tau_rise = 1.0 / params[4].exp();
-                let inv_tau_fall = 1.0 / params[5].exp();
-                villar_flux(a, beta, gamma, t0, inv_tau_rise, inv_tau_fall, t)
-            }
-            ModelVariant::DecayOnly | ModelVariant::FastDecay => {
-                let a = params[0].exp();
-                let beta = params[1];
-                let gamma = params[2].exp();
-                let t0 = params[3];
-                let inv_tau_fall = 1.0 / params[5].exp();
-                villar_flux_decay(a, beta, gamma, t0, inv_tau_fall, t)
-            }
-            ModelVariant::PowerLaw => {
-                let a = params[0].exp();
-                let alpha = params[1];
-                let t0 = params[2];
-                powerlaw_flux(a, alpha, t0, t)
-            }
-            ModelVariant::Bazin => {
-                let a = params[0].exp();
-                let b = params[1];
-                let t0 = params[2];
-                let inv_tau_rise = 1.0 / params[3].exp();
-                let inv_tau_fall = 1.0 / params[4].exp();
-                bazin_flux(a, b, t0, inv_tau_rise, inv_tau_fall, t)
-            }
+    let (eval_model, flux_model):(Box<dyn Fn(f64) -> f64>, Vec<f64>) = match variant {
+        ModelVariant::Full => {
+            let a = params[0].exp();
+            let beta = params[1];
+            let gamma = params[2].exp();
+            let t0 = params[3];
+            let inv_tau_rise: f64 =1.0 / params[4].exp();
+            let inv_tau_fall: f64 =1.0 / params[5].exp();
+            let eval = move |t: f64| villar_flux(a, beta, gamma, t0, inv_tau_rise, inv_tau_fall, t);
+            let flux = times_pred.iter().map(|&t| eval(t)).collect();
+            (Box::new(eval), flux)
+        }
+        ModelVariant::DecayOnly | ModelVariant::FastDecay => {
+            let a = params[0].exp();
+            let beta = params[1];
+            let gamma = params[2].exp();
+            let t0 = params[3];
+            let inv_tau_fall: f64 =1.0 / params[5].exp();
+            let eval = move |t: f64| villar_flux_decay(a, beta, gamma, t0, inv_tau_fall, t);
+            let flux = times_pred.iter().map(|&t| eval(t)).collect();
+            (Box::new(eval), flux)
+        }
+        ModelVariant::PowerLaw => {
+            let a = params[0].exp();
+            let alpha = params[1];
+            let t0 = params[2];
+            let eval = move |t: f64| powerlaw_flux(a, alpha, t0, t);
+            let flux = times_pred.iter().map(|&t| eval(t)).collect();
+            (Box::new(eval), flux)
+        }
+        ModelVariant::Bazin => {
+            let a = params[0].exp();
+            let b = params[1];
+            let t0 = params[2];
+            let inv_tau_rise: f64 =1.0 / params[3].exp();
+            let inv_tau_fall: f64 =1.0 / params[4].exp();
+            let eval = move |t: f64| bazin_flux(a, b, t0, inv_tau_rise, inv_tau_fall, t);
+            let flux = times_pred.iter().map(|&t| eval(t)).collect();
+            (Box::new(eval), flux)
         }
     };
-
-    let flux_model: Vec<f64> = times_pred.iter().map(|t| eval_model(*t)).collect();
 
     // Weighted scale fit in normalized space to avoid forcing model to the observed peak
     let mut num = 0.0;
@@ -553,16 +567,18 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
     let scale_norm = if den > 0.0 { num / den } else { 1.0 };
     let flux_scale = scale_norm * data.peak_flux_obs;
 
-    let mut mags = Vec::new();
-    let mut mags_upper = Vec::new();
-    let mut mags_lower = Vec::new();
+    let vec_length = flux_model.len();
+    let mut mags = Vec::with_capacity(vec_length);
+    let mut mags_upper = Vec::with_capacity(vec_length);
+    let mut mags_lower = Vec::with_capacity(vec_length);
+
+    let frac_sigma = (sigma_extra).hypot(data.noise_frac_median);
+    let sigma_mag = 1.0857 * frac_sigma;
+    let sigma_mag_clamped = sigma_mag.min(0.35);
     for f in &flux_model {
         let f_scaled = f * flux_scale; // back to observed flux units
             let m = flux_to_mag(f_scaled.max(1e-12));
             // sigma_extra is in normalized flux units (fraction of peak); combine as fractional scatter
-            let frac_sigma = (sigma_extra).hypot(data.noise_frac_median);
-            let sigma_mag = 1.0857 * frac_sigma;
-            let sigma_mag_clamped = sigma_mag.min(0.35);
         mags.push(m);
         mags_upper.push(m + sigma_mag_clamped);
         mags_lower.push(m - sigma_mag_clamped);
@@ -634,7 +650,7 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
     (mags, mags_upper, mags_lower, chi2_best, format!("{:?}", variant), param_summary, params, timescale_params)
 }
 
-fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarTimescaleParams>), Box<dyn std::error::Error>> {
+fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarTimescaleParams>), Box<dyn std::error::Error + Send + Sync>> {
     let object_name = input_path
         .split('/')
         .last()
@@ -648,15 +664,8 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
     }
 
     // Prepare per-band data
-    let mut band_plots: Vec<BandPlot> = Vec::new();
-    let colors: HashMap<&str, RGBColor> = [
-        ("g", BLUE),
-        ("r", RED),
-        ("i", GREEN),
-        ("ZTF_g", BLUE),
-        ("ZTF_r", RED),
-        ("ZTF_i", GREEN),
-    ].iter().cloned().collect();
+    let data_length = bands_raw.len();
+    let mut band_plots: Vec<BandPlot> = Vec::with_capacity(data_length);
 
     // Determine time grid across bands
     let mut t_min = f64::INFINITY;
@@ -674,23 +683,26 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
         .collect();
 
     // Build fit data for all bands first
-    let mut band_data: Vec<(String, BandFitData, Vec<f64>)> = Vec::new();
+    let mut band_data: Vec<(String, BandFitData, Vec<f64>)> = Vec::with_capacity(data_length);
     for (band_name, (times, fluxes, flux_errs)) in bands_raw.iter() {
         if fluxes.is_empty() {
             continue;
         }
-        let peak_flux = fluxes.iter().cloned().fold(f64::MIN, f64::max);
+        let peak_flux = fluxes.iter().copied().fold(f64::MIN, f64::max);
         if peak_flux <= 0.0 {
             continue;
         }
-        let normalized_flux: Vec<f64> = fluxes.iter().map(|f| f / peak_flux).collect();
-        let normalized_err: Vec<f64> = flux_errs.iter().map(|e| e / peak_flux).collect();
-        let mut frac_noises: Vec<f64> = normalized_flux.iter().zip(normalized_err.iter())
-            .filter_map(|(f, e)| if *f > 0.0 { Some(e / f) } else { None })
-            .collect();
-        let noise_frac_median = median(&mut frac_noises).unwrap_or(0.0);
+        let inv_peak_flux = 1.0 / peak_flux;
+        let normalized_flux: Vec<f64> = fluxes.iter().map(|f| f * inv_peak_flux).collect();
+        let normalized_err: Vec<f64> = flux_errs.iter().map(|e| e * inv_peak_flux).collect();
+        let mut frac_noises = Vec::with_capacity(data_length);
+        frac_noises.extend(
+            fluxes.iter().zip(flux_errs)
+                .filter_map(|(&f, &e)| if f > 0.0 { Some(e / f) } else { None })
+        );
 
-        let mut mags_obs = Vec::new();
+        let noise_frac_median = median(&mut frac_noises).unwrap_or(0.0);
+        let mut mags_obs = Vec::with_capacity(fluxes.len());
         for f in fluxes {
             let m = flux_to_mag(*f);
             mags_obs.push(m);
@@ -699,7 +711,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
         // Precompute weights outside of cost loop
         let inverse_var_calculation: Vec<f64> = normalized_err.iter().map(|e| 1.0 / (e * e + 1e-10)).collect();
         let fit_data = BandFitData {
-            times: times.clone(),
+            times: times,
             flux: normalized_flux,
             flux_err: normalized_err,
             noise_frac_median,
@@ -760,14 +772,14 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
             .collect();
 
         band_plots.push(BandPlot {
-            times_obs: fit_data.times.clone(),
-            mags_obs: mags_obs.clone(),
+            times_obs: &fit_data.times,
+            mags_obs: &mags_obs,
             mag_errors,
-            times_pred: times_pred.clone(),
+            times_pred: &times_pred,
             mags_model,
             mags_upper,
             mags_lower,
-            label: band_name.clone(),
+            label: &band_name,
             chi2,
             legend_label,
         });
@@ -779,156 +791,153 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
     }
 
     // Determine mag range
-    let mut mag_min = f64::INFINITY;
-    let mut mag_max = f64::NEG_INFINITY;
-    for b in &band_plots {
-        for &m in b.mags_obs.iter().chain(b.mags_model.iter()) {
-            mag_min = mag_min.min(m);
-            mag_max = mag_max.max(m);
-        }
-    }
-    let mag_pad = (mag_max - mag_min) * 0.15;
-    let y_top = (mag_max + mag_pad).min(25.0);
-    let y_bottom = (mag_min - mag_pad).max(15.0);
+    // let mut mag_min = f64::INFINITY;
+    // let mut mag_max = f64::NEG_INFINITY;
+    // for b in &band_plots {
+    //     for &m in b.mags_obs.iter().chain(b.mags_model.iter()) {
+    //         mag_min = mag_min.min(m);
+    //         mag_max = mag_max.max(m);
+    //     }
+    // }
+    // let mag_pad = (mag_max - mag_min) * 0.15;
+    // let y_top = (mag_max + mag_pad).min(25.0);
+    // let y_bottom = (mag_min - mag_pad).max(15.0);
 
-    let output_path = output_dir.join(format!("{}.png", object_name));
-    let root = BitMapBackend::new(&output_path, (1600, 900)).into_drawing_area();
-    root.fill(&WHITE)?;
-    let mut chart = ChartBuilder::on(&root)
-        .margin(12)
-        .x_label_area_size(70)
-        .y_label_area_size(90)
-        .build_cartesian_2d(t_min..t_max, y_top..y_bottom)?;;
+    // let output_path = output_dir.join(format!("{}.png", object_name));
+    // let root = BitMapBackend::new(&output_path, (1600, 900)).into_drawing_area();
+    // root.fill(&WHITE)?;
+    // let mut chart = ChartBuilder::on(&root)
+    //     .margin(12)
+    //     .x_label_area_size(70)
+    //     .y_label_area_size(90)
+    //     .build_cartesian_2d(t_min..t_max, y_top..y_bottom)?;;
 
-    chart.configure_mesh()
-        .x_desc("Time (days)")
-        .y_desc("Flux")
-        .x_label_style(("sans-serif", 24))
-        .y_label_style(("sans-serif", 24))
-        .draw()?;
+    // chart.configure_mesh()
+    //     .x_desc("Time (days)")
+    //     .y_desc("Flux")
+    //     .x_label_style(("sans-serif", 24))
+    //     .y_label_style(("sans-serif", 24))
+    //     .draw()?;
 
-    // Draw timescale markers (if available)
-    if !timescale_params_all.is_empty() {
-        let params = &timescale_params_all[0];  // Use the first (only) fitted band
-        let t0 = params.peak_time;
+    // // Draw timescale markers (if available)
+    // if !timescale_params_all.is_empty() {
+    //     let params = &timescale_params_all[0];  // Use the first (only) fitted band
+    //     let t0 = params.peak_time;
         
-        // FWHM shaded region - draw first so it's behind the t0 line
-        let peak_mag = params.peak_mag;
-        // Try to draw FWHM region from fitted model curve regardless of stored FWHM value
-        if !band_plots.is_empty() {
-            let first_band = &band_plots[0];
-            let half_max_mag = peak_mag + 0.75;  // 0.75 mag fainter = 50% flux
+    //     // FWHM shaded region - draw first so it's behind the t0 line
+    //     let peak_mag = params.peak_mag;
+    //     // Try to draw FWHM region from fitted model curve regardless of stored FWHM value
+    //     if !band_plots.is_empty() {
+    //         let first_band = &band_plots[0];
+    //         let half_max_mag = peak_mag + 0.75;  // 0.75 mag fainter = 50% flux
             
-            // Find time bounds for FWHM by scanning the fitted model curve
-            let mut t_before = f64::NAN;
-            let mut t_after = f64::NAN;
+    //         // Find time bounds for FWHM by scanning the fitted model curve
+    //         let mut t_before = f64::NAN;
+    //         let mut t_after = f64::NAN;
             
-            // Find peak index in fitted magnitudes
-            let mut peak_idx = 0;
-            let mut min_mag = f64::INFINITY;
-            for (i, &mag) in first_band.mags_model.iter().enumerate() {
-                if mag < min_mag {
-                    min_mag = mag;
-                    peak_idx = i;
-                }
-            }
+    //         // Find peak index in fitted magnitudes
+    //         let mut peak_idx = 0;
+    //         let mut min_mag = f64::INFINITY;
+    //         for (i, &mag) in first_band.mags_model.iter().enumerate() {
+    //             if mag < min_mag {
+    //                 min_mag = mag;
+    //                 peak_idx = i;
+    //             }
+    //         }
             
-            // Find time before peak where mag crosses half maximum
-            for i in (0..peak_idx).rev() {
-                if first_band.mags_model[i] >= half_max_mag {
-                    t_before = first_band.times_pred[i];
-                    break;
-                }
-            }
+    //         // Find time before peak where mag crosses half maximum
+    //         for i in (0..peak_idx).rev() {
+    //             if first_band.mags_model[i] >= half_max_mag {
+    //                 t_before = first_band.times_pred[i];
+    //                 break;
+    //             }
+    //         }
             
-            // Find time after peak where mag crosses half maximum
-            for i in (peak_idx + 1)..first_band.mags_model.len() {
-                if first_band.mags_model[i] >= half_max_mag {
-                    t_after = first_band.times_pred[i];
-                    break;
-                }
-            }
+    //         // Find time after peak where mag crosses half maximum
+    //         for i in (peak_idx + 1)..first_band.mags_model.len() {
+    //             if first_band.mags_model[i] >= half_max_mag {
+    //                 t_after = first_band.times_pred[i];
+    //                 break;
+    //             }
+    //         }
             
-            // Draw shaded region if both bounds are valid and within plot range
-            if !t_before.is_nan() && !t_after.is_nan() && 
-               t_before >= t_min && t_after <= t_max {
-                chart.draw_series(std::iter::once(plotters::prelude::Polygon::new(
-                    vec![
-                        (t_before, y_top),
-                        (t_after, y_top),
-                        (t_after, y_bottom),
-                        (t_before, y_bottom),
-                    ],
-                    CYAN.mix(0.4).filled()  // More opaque cyan for visibility
-                )))?;
-            }
-        }
+    //         // Draw shaded region if both bounds are valid and within plot range
+    //         if !t_before.is_nan() && !t_after.is_nan() && 
+    //            t_before >= t_min && t_after <= t_max {
+    //             chart.draw_series(std::iter::once(plotters::prelude::Polygon::new(
+    //                 vec![
+    //                     (t_before, y_top),
+    //                     (t_after, y_top),
+    //                     (t_after, y_bottom),
+    //                     (t_before, y_bottom),
+    //                 ],
+    //                 CYAN.mix(0.4).filled()  // More opaque cyan for visibility
+    //             )))?;
+    //         }
+    //     }
         
-        // t0 line (peak) - solid black, drawn on top of FWHM region
-        if t0.is_finite() && t0 >= t_min && t0 <= t_max {
-            chart.draw_series(std::iter::once(PathElement::new(
-                vec![(t0, y_top), (t0, y_bottom)],
-                BLACK.stroke_width(2)
-            )))?;
-        }
-    }
+    //     // t0 line (peak) - solid black, drawn on top of FWHM region
+    //     if t0.is_finite() && t0 >= t_min && t0 <= t_max {
+    //         chart.draw_series(std::iter::once(PathElement::new(
+    //             vec![(t0, y_top), (t0, y_bottom)],
+    //             BLACK.stroke_width(2)
+    //         )))?;
+    //     }
+    // }
 
-    for b in &band_plots {
-        let color = colors.get(b.label.as_str()).unwrap_or(&BLACK);
+    // for b in &band_plots {
+    //     let color = get_band_color(&b.label);
 
-        // band uncertainty band
-        if !b.mags_upper.is_empty() && b.mags_upper.len() == b.times_pred.len() {
-            let mut area: Vec<(f64, f64)> = Vec::with_capacity(b.times_pred.len() * 2);
-            for i in 0..b.times_pred.len() {
-                area.push((b.times_pred[i], b.mags_upper[i]));
-            }
-            for i in (0..b.times_pred.len()).rev() {
-                area.push((b.times_pred[i], b.mags_lower[i]));
-            }
-            chart.draw_series(std::iter::once(Polygon::new(area, color.mix(0.18).filled())))?;
-        }
+    //     // band uncertainty band
+    //     if !b.mags_upper.is_empty() && b.mags_upper.len() == b.times_pred.len() {
+    //         let mut area: Vec<(f64, f64)> = Vec::with_capacity(b.times_pred.len() * 2);
+    //         for i in 0..b.times_pred.len() {
+    //             area.push((b.times_pred[i], b.mags_upper[i]));
+    //         }
+    //         for i in (0..b.times_pred.len()).rev() {
+    //             area.push((b.times_pred[i], b.mags_lower[i]));
+    //         }
+    //         chart.draw_series(std::iter::once(Polygon::new(area, color.mix(0.18).filled())))?;
+    //     }
 
-        // model line
-        chart.draw_series(LineSeries::new(
-            b.times_pred.iter().zip(b.mags_model.iter()).map(|(t, m)| (*t, *m)),
-            color.stroke_width(2),
-        ))?
-        .label(b.legend_label.clone())
-        .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color.stroke_width(2)));
+    //     // model line
+    //     chart.draw_series(LineSeries::new(
+    //         b.times_pred.iter().zip(b.mags_model.iter()).map(|(t, m)| (*t, *m)),
+    //         color.stroke_width(2),
+    //     ))?
+    //     .label(b.legend_label.clone())
+    //     .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color.stroke_width(2)));
 
-        // Error bars for observations
-        let error_lines: Vec<_> = b.times_obs.iter()
-            .zip(b.mags_obs.iter())
-            .zip(b.mag_errors.iter())
-            .map(|((t, m), err)| {
-                vec![(*t, m - err), (*t, m + err)]
-            })
-            .collect();
+    //     // Error bars for observations
+    //     chart.draw_series(
+    //         b.times_obs.iter()
+    //             .zip(b.mags_obs.iter())
+    //             .zip(b.mag_errors.iter())
+    //             .map(|((&t, &m), &err)| {
+    //                 PathElement::new(vec![(t, m - err), (t, m + err)], color.stroke_width(1))
+    //             })
+    //     )?;
         
-        for error_line in error_lines {
-            chart.draw_series(std::iter::once(PathElement::new(error_line, color.stroke_width(1))))?;
-        }
-        
-        // observations (drawn on top of error bars)
-        chart.draw_series(b.times_obs.iter().zip(b.mags_obs.iter()).map(|(t, m)| {
-            Circle::new((*t, *m), 3, color.filled())
-        }))?;
-    }
+    //     // observations (drawn on top of error bars)
+    //     chart.draw_series(b.times_obs.iter().zip(b.mags_obs.iter()).map(|(t, m)| {
+    //         Circle::new((*t, *m), 3, color.filled())
+    //     }))?;
+    // }
 
-    chart.configure_series_labels()
-        .background_style(&WHITE.mix(0.8))
-        .border_style(&BLACK)
-        .label_font(("sans-serif", 30))
-        .margin(20)
-        .draw()?;
+    // chart.configure_series_labels()
+    //     .background_style(&WHITE.mix(0.8))
+    //     .border_style(&BLACK)
+    //     .label_font(("sans-serif", 30))
+    //     .margin(20)
+    //     .draw()?;
 
-    root.present()?;
-    println!("✓ Villar plot {}", output_path.display());
+    // root.present()?;
+    // println!("✓ Villar plot {}", output_path.display());
     
-    // Store object name with band in all timescale params
-    for param in &mut timescale_params_all {
-        param.band = format!("{}|{}", object_name, param.band);
-    }
+    // // Store object name with band in all timescale params
+    // for param in &mut timescale_params_all {
+    //     param.band = format!("{}|{}", object_name, param.band);
+    // }
     
     Ok((total_fit_time, timescale_params_all))
 }
@@ -964,30 +973,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(output_dir)?;
 
     let mut total_fit_time = 0.0;
+    let clock_start = Instant::now();
     let mut all_params: Vec<VillarTimescaleParams> = Vec::new();
     
-    // let parallel_results: Vec<_> = targets.par_iter().map(|t| {(t, process_file(t, output_dir))}).collect();
+    let parallel_results: Vec<_> = targets.par_iter().map(|t| {(t, process_file(t, output_dir))}).collect();
+    let clock_duration = clock_start.elapsed().as_secs_f64();
 
-    // for (t, result) in parallel_results {
-    //     match result{
-    //             Ok((fit_time, params)) => {
-    //             total_fit_time += fit_time;
-    //             all_params.extend(params);
-    //         },
-    //     Err(e) => eprintln!("Error processing {}: {}", t, e),
-    //     }
-    // }
-
-    for (idx, t) in targets.iter().enumerate() {
-        println!("\n[{}/{}] Villar fitting {}", idx + 1, targets.len(), t);
-        match process_file(t, output_dir) {
-            Ok((fit_time, params)) => {
-                total_fit_time += fit_time;
-                all_params.extend(params);
-            },
-            Err(e) => eprintln!("Error processing {}: {}", t, e),
-        }
+    for (t, result) in parallel_results {
+         match result{
+                 Ok((fit_time, params)) => {
+                 total_fit_time += fit_time;
+                 all_params.extend(params);
+             },
+         Err(e) => eprintln!("Error processing {}: {}", t, e),
+         }
     }
+
+//    for (idx, t) in targets.iter().enumerate() {
+//        println!("\n[{}/{}] Villar fitting {}", idx + 1, targets.len(), t);
+//        match process_file(t, output_dir) {
+//            Ok((fit_time, params)) => {
+//                total_fit_time += fit_time;
+//                all_params.extend(params);
+//            },
+//            Err(e) => eprintln!("Error processing {}: {}", t, e),
+//        }
+//    }
 
     // Save timescale parameters to CSV
     let csv_path = "parametric_timescale_parameters.csv";
@@ -1019,6 +1030,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n✓ Completed {} light curves", targets.len());
     println!("  Plots in {}", output_dir.display());
-    println!("  Total fitting time: {:.2}s", total_fit_time);
+    println!("  Total fitting time (all cores): {:.2}s", total_fit_time);
+    println!("  Fitting time: {:.2}s", clock_duration);
     Ok(())
 }

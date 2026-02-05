@@ -47,7 +47,7 @@ pub struct TimescaleParams {
     pub gp_n_inflections: f64,
 }
 
-pub fn read_ztf_lightcurve(path: &str, convert_to_mag: bool) -> Result<HashMap<String, BandData>, Box<dyn std::error::Error>> {
+pub fn read_ztf_lightcurve(path: &str, convert_to_mag: bool) -> Result<HashMap<String, BandData>, Box<dyn std::error::Error + Send + Sync>> {
     let contents = fs::read_to_string(path)?;
     let mut bands: HashMap<String, BandData> = HashMap::new();
 
