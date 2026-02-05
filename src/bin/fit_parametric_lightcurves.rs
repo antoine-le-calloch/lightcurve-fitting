@@ -392,6 +392,25 @@ struct RefFit {
     variant: ModelVariant,
 }
 
+
+fn find_scale(data: &BandFitData, sigma_extra: f64, model: impl Fn(f64) -> f64) -> f64 {
+    let mut num = 0.0;
+    let mut den = 0.0;
+    let s2 = sigma_extra * sigma_extra + 1e-10;
+
+    for i in 0..data.times.len() {
+        let m = model(data.times[i]);
+        let y = data.flux[i];
+        let var = data.flux_err[i] * data.flux_err[i] + s2;
+        let w = 1.0 / var;
+        
+        num += m * y * w;
+        den += m * m * w;
+    }
+    
+    if den > 0.0 { num / den } else { 1.0 }
+}
+
 fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, force_variant: Option<ModelVariant>) -> (Vec<f64>, Vec<f64>, Vec<f64>, f64, String, String, Vec<f64>, VillarTimescaleParams) {
     let run_fit = |base: Option<&[f64]>, variant: ModelVariant, iters: u64, particles: usize| {
         let (lower, upper) = pso_bounds(base, variant);
@@ -511,7 +530,7 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
         }
     };
 
-    let (eval_model, flux_model):(Box<dyn Fn(f64) -> f64>, Vec<f64>) = match variant {
+    let (flux_model, scale_norm) = match variant {
         ModelVariant::Full => {
             let a = params[0].exp();
             let beta = params[1];
@@ -519,9 +538,12 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
             let t0 = params[3];
             let inv_tau_rise: f64 =1.0 / params[4].exp();
             let inv_tau_fall: f64 =1.0 / params[5].exp();
-            let eval = move |t: f64| villar_flux(a, beta, gamma, t0, inv_tau_rise, inv_tau_fall, t);
-            let flux = times_pred.iter().map(|&t| eval(t)).collect();
-            (Box::new(eval), flux)
+
+            let model = |t: f64| villar_flux(a, beta, gamma, t0, inv_tau_rise, inv_tau_fall, t);
+            let flux: Vec<f64> = times_pred.iter().map(|&t| model(t)).collect();
+            let scale = find_scale(data, sigma_extra, model);
+
+            (flux, scale)
         }
         ModelVariant::DecayOnly | ModelVariant::FastDecay => {
             let a = params[0].exp();
@@ -529,17 +551,23 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
             let gamma = params[2].exp();
             let t0 = params[3];
             let inv_tau_fall: f64 =1.0 / params[5].exp();
-            let eval = move |t: f64| villar_flux_decay(a, beta, gamma, t0, inv_tau_fall, t);
-            let flux = times_pred.iter().map(|&t| eval(t)).collect();
-            (Box::new(eval), flux)
+
+            let model = |t: f64| villar_flux_decay(a, beta, gamma, t0, inv_tau_fall, t);
+            let flux: Vec<f64> = times_pred.iter().map(|&t| model(t)).collect();
+            let scale = find_scale(data, sigma_extra, model);
+
+            (flux, scale)
         }
         ModelVariant::PowerLaw => {
             let a = params[0].exp();
             let alpha = params[1];
             let t0 = params[2];
-            let eval = move |t: f64| powerlaw_flux(a, alpha, t0, t);
-            let flux = times_pred.iter().map(|&t| eval(t)).collect();
-            (Box::new(eval), flux)
+
+            let model = |t: f64| powerlaw_flux(a, alpha, t0, t);
+            let flux: Vec<f64> = times_pred.iter().map(|&t| model(t)).collect();
+            let scale = find_scale(data, sigma_extra, model);
+
+            (flux, scale)
         }
         ModelVariant::Bazin => {
             let a = params[0].exp();
@@ -547,24 +575,15 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
             let t0 = params[2];
             let inv_tau_rise: f64 =1.0 / params[3].exp();
             let inv_tau_fall: f64 =1.0 / params[4].exp();
-            let eval = move |t: f64| bazin_flux(a, b, t0, inv_tau_rise, inv_tau_fall, t);
-            let flux = times_pred.iter().map(|&t| eval(t)).collect();
-            (Box::new(eval), flux)
+            let model = |t: f64| bazin_flux(a, b, t0, inv_tau_rise, inv_tau_fall, t);
+            let flux : Vec<f64>= times_pred.iter().map(|&t| model(t)).collect();
+            let scale = find_scale(data, sigma_extra, model);
+
+            (flux, scale)
         }
     };
 
     // Weighted scale fit in normalized space to avoid forcing model to the observed peak
-    let mut num = 0.0;
-    let mut den = 0.0;
-    for i in 0..data.times.len() {
-        let m = eval_model(data.times[i]);
-        let y = data.flux[i];
-        let var = data.flux_err[i] * data.flux_err[i] + sigma_extra * sigma_extra + 1e-10;
-        let w = 1.0 / var;
-        num += m * y * w;
-        den += m * m * w;
-    }
-    let scale_norm = if den > 0.0 { num / den } else { 1.0 };
     let flux_scale = scale_norm * data.peak_flux_obs;
 
     let vec_length = flux_model.len();
@@ -976,29 +995,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let clock_start = Instant::now();
     let mut all_params: Vec<VillarTimescaleParams> = Vec::new();
     
-    let parallel_results: Vec<_> = targets.par_iter().map(|t| {(t, process_file(t, output_dir))}).collect();
+    // let parallel_results: Vec<_> = targets.par_iter().map(|t| {(t, process_file(t, output_dir))}).collect();
     let clock_duration = clock_start.elapsed().as_secs_f64();
 
-    for (t, result) in parallel_results {
-         match result{
-                 Ok((fit_time, params)) => {
-                 total_fit_time += fit_time;
-                 all_params.extend(params);
-             },
-         Err(e) => eprintln!("Error processing {}: {}", t, e),
-         }
-    }
+    // for (t, result) in parallel_results {
+    //      match result{
+    //              Ok((fit_time, params)) => {
+    //              total_fit_time += fit_time;
+    //              all_params.extend(params);
+    //          },
+    //      Err(e) => eprintln!("Error processing {}: {}", t, e),
+    //      }
+    // }
 
-//    for (idx, t) in targets.iter().enumerate() {
-//        println!("\n[{}/{}] Villar fitting {}", idx + 1, targets.len(), t);
-//        match process_file(t, output_dir) {
-//            Ok((fit_time, params)) => {
-//                total_fit_time += fit_time;
-//                all_params.extend(params);
-//            },
-//            Err(e) => eprintln!("Error processing {}: {}", t, e),
-//        }
-//    }
+   for (idx, t) in targets.iter().enumerate() {
+       println!("\n[{}/{}] Villar fitting {}", idx + 1, targets.len(), t);
+       match process_file(t, output_dir) {
+           Ok((fit_time, params)) => {
+               total_fit_time += fit_time;
+               all_params.extend(params);
+           },
+           Err(e) => eprintln!("Error processing {}: {}", t, e),
+       }
+   }
 
     // Save timescale parameters to CSV
     let csv_path = "parametric_timescale_parameters.csv";
