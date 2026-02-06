@@ -5,3 +5,5 @@ photometry.json
 classifications.csv
 parametric_timescale_parameters.csv
 parametric_plots
+perf.data
+perf.data.old

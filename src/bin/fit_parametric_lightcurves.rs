@@ -822,148 +822,148 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<VillarT
     }
 
     // Determine mag range
-    // let mut mag_min = f32::INFINITY;
-    // let mut mag_max = f32::NEG_INFINITY;
-    // for b in &band_plots {
-    //     for &m in b.mags_obs.iter().chain(b.mags_model.iter()) {
-    //         mag_min = mag_min.min(m);
-    //         mag_max = mag_max.max(m);
-    //     }
-    // }
-    // let mag_pad = (mag_max - mag_min) * 0.15;
-    // let y_top = (mag_max + mag_pad).min(25.0);
-    // let y_bottom = (mag_min - mag_pad).max(15.0);
+    let mut mag_min = f32::INFINITY;
+    let mut mag_max = f32::NEG_INFINITY;
+    for b in &band_plots {
+        for &m in b.mags_obs.iter().chain(b.mags_model.iter()) {
+            mag_min = mag_min.min(m);
+            mag_max = mag_max.max(m);
+        }
+    }
+    let mag_pad = (mag_max - mag_min) * 0.15;
+    let y_top = (mag_max + mag_pad).min(25.0);
+    let y_bottom = (mag_min - mag_pad).max(15.0);
 
-    // let output_path = output_dir.join(format!("{}.png", object_name));
-    // let root = BitMapBackend::new(&output_path, (1600, 900)).into_drawing_area();
-    // root.fill(&WHITE)?;
-    // let mut chart = ChartBuilder::on(&root)
-    //     .margin(12)
-    //     .x_label_area_size(70)
-    //     .y_label_area_size(90)
-    //     .build_cartesian_2d(t_min..t_max, y_top..y_bottom)?;
+    let output_path = output_dir.join(format!("{}.png", object_name));
+    let root = BitMapBackend::new(&output_path, (1600, 900)).into_drawing_area();
+    root.fill(&WHITE)?;
+    let mut chart = ChartBuilder::on(&root)
+        .margin(12)
+        .x_label_area_size(70)
+        .y_label_area_size(90)
+        .build_cartesian_2d(t_min..t_max, y_top..y_bottom)?;
 
-    // chart.configure_mesh()
-    //     .x_desc("Time (days)")
-    //     .y_desc("Flux")
-    //     .x_label_style(("sans-serif", 24))
-    //     .y_label_style(("sans-serif", 24))
-    //     .draw()?;
+    chart.configure_mesh()
+        .x_desc("Time (days)")
+        .y_desc("Flux")
+        .x_label_style(("sans-serif", 24))
+        .y_label_style(("sans-serif", 24))
+        .draw()?;
 
-    // // Draw timescale markers (if available)
-    // if !timescale_params_all.is_empty() {
-    //     let params = &timescale_params_all[0];  // Use the first (only) fitted band
-    //     let t0 = params.peak_time;
+    // Draw timescale markers (if available)
+    if !timescale_params_all.is_empty() {
+        let params = &timescale_params_all[0];  // Use the first (only) fitted band
+        let t0 = params.peak_time;
         
-    //     // FWHM shaded region - draw first so it's behind the t0 line
-    //     let peak_mag = params.peak_mag;
-    //     // Try to draw FWHM region from fitted model curve regardless of stored FWHM value
-    //     if !band_plots.is_empty() {
-    //         let first_band = &band_plots[0];
-    //         let half_max_mag = peak_mag + 0.75;  // 0.75 mag fainter = 50% flux
+        // FWHM shaded region - draw first so it's behind the t0 line
+        let peak_mag = params.peak_mag;
+        // Try to draw FWHM region from fitted model curve regardless of stored FWHM value
+        if !band_plots.is_empty() {
+            let first_band = &band_plots[0];
+            let half_max_mag = peak_mag + 0.75;  // 0.75 mag fainter = 50% flux
             
-    //         // Find time bounds for FWHM by scanning the fitted model curve
-    //         let mut t_before = f32::NAN;
-    //         let mut t_after = f32::NAN;
+            // Find time bounds for FWHM by scanning the fitted model curve
+            let mut t_before = f32::NAN;
+            let mut t_after = f32::NAN;
             
-    //         // Find peak index in fitted magnitudes
-    //         let mut peak_idx = 0;
-    //         let mut min_mag = f32::INFINITY;
-    //         for (i, &mag) in first_band.mags_model.iter().enumerate() {
-    //             if mag < min_mag {
-    //                 min_mag = mag;
-    //                 peak_idx = i;
-    //             }
-    //         }
+            // Find peak index in fitted magnitudes
+            let mut peak_idx = 0;
+            let mut min_mag = f32::INFINITY;
+            for (i, &mag) in first_band.mags_model.iter().enumerate() {
+                if mag < min_mag {
+                    min_mag = mag;
+                    peak_idx = i;
+                }
+            }
             
-    //         // Find time before peak where mag crosses half maximum
-    //         for i in (0..peak_idx).rev() {
-    //             if first_band.mags_model[i] >= half_max_mag {
-    //                 t_before = first_band.times_pred[i];
-    //                 break;
-    //             }
-    //         }
+            // Find time before peak where mag crosses half maximum
+            for i in (0..peak_idx).rev() {
+                if first_band.mags_model[i] >= half_max_mag {
+                    t_before = first_band.times_pred[i];
+                    break;
+                }
+            }
             
-    //         // Find time after peak where mag crosses half maximum
-    //         for i in (peak_idx + 1)..first_band.mags_model.len() {
-    //             if first_band.mags_model[i] >= half_max_mag {
-    //                 t_after = first_band.times_pred[i];
-    //                 break;
-    //             }
-    //         }
+            // Find time after peak where mag crosses half maximum
+            for i in (peak_idx + 1)..first_band.mags_model.len() {
+                if first_band.mags_model[i] >= half_max_mag {
+                    t_after = first_band.times_pred[i];
+                    break;
+                }
+            }
             
-    //         // Draw shaded region if both bounds are valid and within plot range
-    //         if !t_before.is_nan() && !t_after.is_nan() && 
-    //            t_before >= t_min && t_after <= t_max {
-    //             chart.draw_series(std::iter::once(plotters::prelude::Polygon::new(
-    //                 vec![
-    //                     (t_before, y_top),
-    //                     (t_after, y_top),
-    //                     (t_after, y_bottom),
-    //                     (t_before, y_bottom),
-    //                 ],
-    //                 CYAN.mix(0.4).filled()  // More opaque cyan for visibility
-    //             )))?;
-    //         }
-    //     }
+            // Draw shaded region if both bounds are valid and within plot range
+            if !t_before.is_nan() && !t_after.is_nan() && 
+               t_before >= t_min && t_after <= t_max {
+                chart.draw_series(std::iter::once(plotters::prelude::Polygon::new(
+                    vec![
+                        (t_before, y_top),
+                        (t_after, y_top),
+                        (t_after, y_bottom),
+                        (t_before, y_bottom),
+                    ],
+                    CYAN.mix(0.4).filled()  // More opaque cyan for visibility
+                )))?;
+            }
+        }
         
-    //     // t0 line (peak) - solid black, drawn on top of FWHM region
-    //     if t0.is_finite() && t0 >= t_min && t0 <= t_max {
-    //         chart.draw_series(std::iter::once(PathElement::new(
-    //             vec![(t0, y_top), (t0, y_bottom)],
-    //             BLACK.stroke_width(2)
-    //         )))?;
-    //     }
-    // }
+        // t0 line (peak) - solid black, drawn on top of FWHM region
+        if t0.is_finite() && t0 >= t_min && t0 <= t_max {
+            chart.draw_series(std::iter::once(PathElement::new(
+                vec![(t0, y_top), (t0, y_bottom)],
+                BLACK.stroke_width(2)
+            )))?;
+        }
+    }
 
-    // for b in &band_plots {
-    //     let color = get_band_color(&b.label);
+    for b in &band_plots {
+        let color = get_band_color(&b.label);
 
-    //     // band uncertainty band
-    //     if !b.mags_upper.is_empty() && b.mags_upper.len() == b.times_pred.len() {
-    //         let mut area: Vec<(f32, f32)> = Vec::with_capacity(b.times_pred.len() * 2);
-    //         for i in 0..b.times_pred.len() {
-    //             area.push((b.times_pred[i], b.mags_upper[i]));
-    //         }
-    //         for i in (0..b.times_pred.len()).rev() {
-    //             area.push((b.times_pred[i], b.mags_lower[i]));
-    //         }
-    //         chart.draw_series(std::iter::once(Polygon::new(area, color.mix(0.18).filled())))?;
-    //     }
+        // band uncertainty band
+        if !b.mags_upper.is_empty() && b.mags_upper.len() == b.times_pred.len() {
+            let mut area: Vec<(f32, f32)> = Vec::with_capacity(b.times_pred.len() * 2);
+            for i in 0..b.times_pred.len() {
+                area.push((b.times_pred[i], b.mags_upper[i]));
+            }
+            for i in (0..b.times_pred.len()).rev() {
+                area.push((b.times_pred[i], b.mags_lower[i]));
+            }
+            chart.draw_series(std::iter::once(Polygon::new(area, color.mix(0.18).filled())))?;
+        }
 
-    //     // model line
-    //     chart.draw_series(LineSeries::new(
-    //         b.times_pred.iter().zip(b.mags_model.iter()).map(|(t, m)| (*t, *m)),
-    //         color.stroke_width(2),
-    //     ))?
-    //     .label(b.legend_label.clone())
-    //     .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color.stroke_width(2)));
+        // model line
+        chart.draw_series(LineSeries::new(
+            b.times_pred.iter().zip(b.mags_model.iter()).map(|(t, m)| (*t, *m)),
+            color.stroke_width(2),
+        ))?
+        .label(b.legend_label.clone())
+        .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color.stroke_width(2)));
 
-    //     // Error bars for observations
-    //     chart.draw_series(
-    //         b.times_obs.iter()
-    //             .zip(b.mags_obs.iter())
-    //             .zip(b.mag_errors.iter())
-    //             .map(|((&t, &m), &err)| {
-    //                 PathElement::new(vec![(t, m - err), (t, m + err)], color.stroke_width(1))
-    //             })
-    //     )?;
+        // Error bars for observations
+        chart.draw_series(
+            b.times_obs.iter()
+                .zip(b.mags_obs.iter())
+                .zip(b.mag_errors.iter())
+                .map(|((&t, &m), &err)| {
+                    PathElement::new(vec![(t, m - err), (t, m + err)], color.stroke_width(1))
+                })
+        )?;
         
-    //     // observations (drawn on top of error bars)
-    //     chart.draw_series(b.times_obs.iter().zip(b.mags_obs.iter()).map(|(t, m)| {
-    //         Circle::new((*t, *m), 3, color.filled())
-    //     }))?;
-    // }
+        // observations (drawn on top of error bars)
+        chart.draw_series(b.times_obs.iter().zip(b.mags_obs.iter()).map(|(t, m)| {
+            Circle::new((*t, *m), 3, color.filled())
+        }))?;
+    }
 
-    // chart.configure_series_labels()
-    //     .background_style(&WHITE.mix(0.8))
-    //     .border_style(&BLACK)
-    //     .label_font(("sans-serif", 30))
-    //     .margin(20)
-    //     .draw()?;
+    chart.configure_series_labels()
+        .background_style(&WHITE.mix(0.8))
+        .border_style(&BLACK)
+        .label_font(("sans-serif", 30))
+        .margin(20)
+        .draw()?;
 
-    // root.present()?;
-    // println!("✓ Villar plot {}", output_path.display());
+    root.present()?;
+    println!("✓ Villar plot {}", output_path.display());
     
     // Store object name with band in all timescale params
     for param in &mut timescale_params_all {
@@ -1033,6 +1033,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Save timescale parameters to CSV
     let csv_path = "parametric_timescale_parameters.csv";
+    println!("Number of params found: {}", all_params.len());
     if !all_params.is_empty() {
         let mut csv_content = String::from("object,band,variant,rise_time_days,decay_time_days,peak_time_days,chi2,n_obs,fwhm_days,rise_rate_mag_per_day,decay_rate_mag_per_day,powerlaw_amplitude,powerlaw_index\n");
         for param in &all_params {
