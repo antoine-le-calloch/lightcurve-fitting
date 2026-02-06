@@ -233,7 +233,7 @@ fn compute_predictive_features(
     }
 }
 
-fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<TimescaleParams>), Box<dyn std::error::Error>> {
+fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<TimescaleParams>), Box<dyn std::error::Error + Send + Sync>> {
     let object_name = input_path.split('/').last().unwrap_or("unknown").trim_end_matches(".csv");
     let bands = read_ztf_lightcurve(input_path, true)?;;
     if bands.is_empty() { eprintln!("No valid data found in {}", input_path); return Ok((0.0, Vec::new())); }
@@ -738,7 +738,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
     Ok((total_fit_time, timescale_params))
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<String> = std::env::args().collect();
     let mut targets: Vec<String> = Vec::new();
     if args.len() >= 2 { targets.push(args[1].clone()); } else {

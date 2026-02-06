@@ -356,7 +356,7 @@ fn compute_predictive_features(
     }
 }
 
-fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<TimescaleParams>), Box<dyn std::error::Error>> {
+fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<TimescaleParams>), Box<dyn std::error::Error + Send + Sync>> {
     let object_name = input_path
         .split('/')
         .last()
@@ -944,7 +944,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
     Ok((total_fit_time, timescale_params))
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<String> = std::env::args().collect();
     let mut targets: Vec<String> = Vec::new();
 
