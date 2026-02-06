@@ -10,7 +10,6 @@ use argmin::solver::particleswarm::ParticleSwarm;
 use plotters::prelude::*;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
-use fast_math::{exp};
 
 use lightcurve_fiting::lightcurve_common::read_ztf_lightcurve;
 
@@ -85,11 +84,6 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
                 let t0 = p[2];
                 let sigma_penalty = sigma_extra*sigma_extra*100.0;
 
-                // move this up here under the assumption total_chi2 << 1e6
-                if t0 < -100.0 || t0 > 50.0 || alpha < 0.0 || alpha > 5.0 {
-                    return Ok(1e6 + sigma_penalty);
-                }
-
                 let mut total_chi2 = 0.0;
                 for i in 0..len {
                     let model = powerlaw_flux(a, alpha, t0, times[i]);
@@ -99,7 +93,13 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
 
                 let n = len.max(1) as f64;
                 // Add penalty for large sigma_extra to prevent overfitting
-                Ok(total_chi2 / n + sigma_penalty)
+                let penalty = if t0 < -100.0 || t0 > 50.0 || alpha < 0.0 || alpha > 5.0 {
+                    1e6
+                } else {
+                    0.0
+                };
+
+                Ok(total_chi2 / n + penalty + sigma_penalty)
             }
 
             ModelVariant::Bazin => {
@@ -115,10 +115,6 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
                 let b = p[1];
                 let t0 = p[2];
 
-                if t0 < -100.0 || t0 > 100.0 || inv_tau_rise > 1e6 || inv_tau_rise < 1e-4 || inv_tau_fall > 1e6 || inv_tau_fall < 1e-4 {
-                    return Ok(1e6)
-                }
-
                 let mut total_chi2 = 0.0;
                 for i in 0..len {
                     let model = bazin_flux(a, b, t0, inv_tau_rise, inv_tau_fall, times[i]);
@@ -126,8 +122,14 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
                     total_chi2 += diff * diff * weights[i];
                 }
 
+                let penalty = if  t0 < -100.0 || t0 > 100.0 || inv_tau_rise > 1e6 || inv_tau_rise < 1e-4 || inv_tau_fall > 1e6 || inv_tau_fall < 1e-4 {
+                    1e6
+                } else {
+                    0.0
+                };
+
                 let n = len.max(1) as f64;
-                Ok(total_chi2 / n)
+                Ok(total_chi2 / n + penalty)
             }
             _ => {
                 let a = p[0].exp();
@@ -141,10 +143,6 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
                 }
 
                 let t0 = p[3];
-
-                if t0 < -100.0 || t0 > 100.0 || inv_tau_rise > 1e6 || inv_tau_rise < 1e-4 || inv_tau_fall > 1e6 || inv_tau_fall < 1e-4 {
-                    return Ok(1e6)
-                }
 
                 let beta = p[1];
                 let mut total_chi2 = 0.0;
@@ -168,8 +166,13 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
 
                 // Add penalty for large sigma_extra to prevent overfitting
                 let sigma_penalty = sigma_extra*sigma_extra*100.0;
+                let penalty = if  t0 < -100.0 || t0 > 100.0 || inv_tau_rise > 1e6 || inv_tau_rise < 1e-4 || inv_tau_fall > 1e6 || inv_tau_fall < 1e-4 {
+                    1e6
+                } else {
+                    0.0
+                };
                 let n = self.band.times.len().max(1) as f64;
-                Ok(total_chi2 / n + sigma_penalty)
+                Ok(total_chi2 / n + penalty + sigma_penalty)
             }
         }
     }
@@ -457,28 +460,28 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
         let base = if use_ref_variant { Some(ref_fit.unwrap().params.as_slice()) } else { None };
         run_fit(base, ModelVariant::Full, 100, 60)
     } else {
-        (SVector::<f64, 7>::zeros(), f64::INFINITY)
+        (SVector::<f64, 7>::from_element(f64::NAN), f64::INFINITY)
     };
     
     let (params_fast, chi2_fast) = if try_variants.contains(&ModelVariant::FastDecay) {
         let base = if use_ref_variant { Some(ref_fit.unwrap().params.as_slice()) } else { None };
         run_fit(base, ModelVariant::FastDecay, 100, 60)
     } else {
-        (SVector::<f64, 7>::zeros(), f64::INFINITY)
+        (SVector::<f64, 7>::from_element(f64::NAN), f64::INFINITY)
     };
     
     let (params_power, chi2_power) = if try_variants.contains(&ModelVariant::PowerLaw) {
         let base = if use_ref_variant { Some(ref_fit.unwrap().params.as_slice()) } else { None };
         run_fit(base, ModelVariant::PowerLaw, 80, 50)
     } else {
-        (SVector::<f64, 7>::zeros(), f64::INFINITY)
+        (SVector::<f64, 7>::from_element(f64::NAN), f64::INFINITY)
     };
 
     let (params_bazin, chi2_bazin) = if try_variants.contains(&ModelVariant::Bazin) {
         let base = if use_ref_variant { Some(ref_fit.unwrap().params.as_slice()) } else { None };
         run_fit(base, ModelVariant::Bazin, 100, 60)
     } else {
-        (SVector::<f64, 7>::zeros(), f64::INFINITY)
+        (SVector::<f64, 7>::from_element(f64::NAN), f64::INFINITY)
     };
 
     let (params, variant, chi2_best) = {
@@ -490,7 +493,7 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
     };
 
     // If fitting completely failed, return NaN values
-    if params.max() == 0.0 {
+    if params == SVector::<f64, 7>::from_element(f64::NAN) {
         let nan_vec = vec![f64::NAN; times_pred.len()];
         let failed_params = VillarTimescaleParams {
             band: String::from("unknown"),
@@ -1007,29 +1010,29 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let clock_start = Instant::now();
     let mut all_params: Vec<VillarTimescaleParams> = Vec::new();
     
-    // let parallel_results: Vec<_> = targets.par_iter().map(|t| {(t, process_file(t, output_dir))}).collect();
+    let parallel_results: Vec<_> = targets.par_iter().map(|t| {(t, process_file(t, output_dir))}).collect();
     let clock_duration = clock_start.elapsed().as_secs_f64();
 
-    // for (t, result) in parallel_results {
-    //      match result{
-    //              Ok((fit_time, params)) => {
-    //              total_fit_time += fit_time;
-    //              all_params.extend(params);
-    //          },
-    //      Err(e) => eprintln!("Error processing {}: {}", t, e),
-    //      }
-    // }
+    for (t, result) in parallel_results {
+         match result{
+                 Ok((fit_time, params)) => {
+                 total_fit_time += fit_time;
+                 all_params.extend(params);
+             },
+         Err(e) => eprintln!("Error processing {}: {}", t, e),
+         }
+    }
 
-   for (idx, t) in targets.iter().enumerate() {
-       println!("\n[{}/{}] Villar fitting {}", idx + 1, targets.len(), t);
-       match process_file(t, output_dir) {
-           Ok((fit_time, params)) => {
-               total_fit_time += fit_time;
-               all_params.extend(params);
-           },
-           Err(e) => eprintln!("Error processing {}: {}", t, e),
-       }
-   }
+//    for (idx, t) in targets.iter().enumerate() {
+//        println!("\n[{}/{}] Villar fitting {}", idx + 1, targets.len(), t);
+//        match process_file(t, output_dir) {
+//            Ok((fit_time, params)) => {
+//                total_fit_time += fit_time;
+//                all_params.extend(params);
+//            },
+//            Err(e) => eprintln!("Error processing {}: {}", t, e),
+//        }
+//    }
 
     // Save timescale parameters to CSV
     let csv_path = "parametric_timescale_parameters.csv";
