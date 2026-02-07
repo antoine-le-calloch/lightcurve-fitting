@@ -1,0 +1,801 @@
+diff --git a/src/bin/fit_parametric_lightcurves.rs b/src/bin/fit_parametric_lightcurves.rs
+index fbf1b4d..1fd14d4 100644
+--- a/src/bin/fit_parametric_lightcurves.rs
++++ b/src/bin/fit_parametric_lightcurves.rs
+@@ -1,13 +1,17 @@
++use core::f64;
+ use std::collections::HashMap;
+ use std::fs;
+ use std::path::Path;
+ use std::time::Instant;
+-
+-use argmin::core::{CostFunction, Error as ArgminError, Executor, State};
++use rayon::prelude::*;
++use nalgebra::SVector;
++use argmin::core::{CostFunction, Error as ArgminError, Executor, State, ArgminFloat};
+ use argmin::solver::particleswarm::ParticleSwarm;
+ use plotters::prelude::*;
++use rand::SeedableRng;
++use rand::rngs::SmallRng;
+ 
+-use lightcurve_fiting::lightcurve_common::{BandData, read_ztf_lightcurve};
++use lightcurve_fiting::lightcurve_common::read_ztf_lightcurve;
+ 
+ // Zeropoint consistent with GP plotter
+ const ZP: f64 = 23.9;
+@@ -40,145 +44,162 @@ struct VillarTimescaleParams {
+ }
+ 
+ #[derive(Clone)]
+-struct BandFitData {
+-    times: Vec<f64>,
++struct BandFitData<'a> {
++    times: &'a [f64],
+     flux: Vec<f64>,
+     flux_err: Vec<f64>,
+     noise_frac_median: f64,
+     peak_flux_obs: f64,
++    // Precompute weights outside of cost loop
++    weights: Vec<f64>
+ }
+ 
+ #[derive(Clone)]
+-struct SingleBandVillarCost {
+-    band: BandFitData,
++struct SingleBandVillarCost <'a>{
++    band: &'a BandFitData <'a>,
+     variant: ModelVariant,
+ }
+ 
+-impl CostFunction for SingleBandVillarCost {
+-    type Param = Vec<f64>;
++impl <'a> CostFunction for SingleBandVillarCost <'a>{
++    type Param = SVector<f64, 7>;
+     type Output = f64;
+ 
+     fn cost(&self, p: &Self::Param) -> Result<Self::Output, ArgminError> {
++        let times = &self.band.times;
++        let fluxes = &self.band.flux;
++        let weights = &self.band.weights;
++        let len = self.band.times.len();
++        assert!(self.band.flux.len() == len && self.band.weights.len() == len);
++
+         match self.variant {
+             ModelVariant::PowerLaw => {
+                 let a = p[0].exp();
+-                let alpha = p[1];
+-                let t0 = p[2];
+                 let sigma_extra = p[3].exp();
+ 
+                 if !a.is_finite() || !sigma_extra.is_finite() {
+-                    return Ok(1e99);
++                    return Ok(f64::INFINITY);
+                 }
+ 
++                let alpha = p[1];
++                let t0 = p[2];
++                let sigma_penalty = sigma_extra*sigma_extra*100.0;
++
+                 let mut total_chi2 = 0.0;
+-                let mut n = 0usize;
+-                for i in 0..self.band.times.len() {
+-                    let model = powerlaw_flux(a, alpha, t0, self.band.times[i]);
+-                    let diff = model - self.band.flux[i];
+-                    // Use only observational errors in chi2, not sigma_extra
+-                    let var = self.band.flux_err[i].powi(2) + 1e-10;
+-                    total_chi2 += diff * diff / var;
+-                    n += 1;
++                for i in 0..len {
++                    let model = powerlaw_flux(a, alpha, t0, times[i]);
++                    let diff = model - fluxes[i];
++                    total_chi2 += diff * diff * weights[i];
+                 }
++
++                let n = len.max(1) as f64;
++                // Add penalty for large sigma_extra to prevent overfitting
+                 let penalty = if t0 < -100.0 || t0 > 50.0 || alpha < 0.0 || alpha > 5.0 {
+                     1e6
+                 } else {
+                     0.0
+                 };
+-                // Add penalty for large sigma_extra to prevent overfitting
+-                let sigma_penalty = (sigma_extra / 0.1).powi(2);
+-                Ok(total_chi2 / n.max(1) as f64 + penalty + sigma_penalty)
++
++                Ok(total_chi2 / n + penalty + sigma_penalty)
+             }
++
+             ModelVariant::Bazin => {
+                 // Bazin: [log_a, b, t0, log_tau_rise, log_tau_fall]
+                 let a = p[0].exp();
+-                let b = p[1];
+-                let t0 = p[2];
+-                let tau_rise = p[3].exp();
+-                let tau_fall = p[4].exp();
++                let inv_tau_rise: f64 =1.0 / p[3].exp();
++                let inv_tau_fall: f64 =1.0 / p[4].exp();
+ 
+-                if !a.is_finite() || !tau_rise.is_finite() || !tau_fall.is_finite() {
+-                    return Ok(1e99);
++                if !a.is_finite() || !inv_tau_rise.is_finite() || !inv_tau_fall.is_finite() {
++                    return Ok(f64::INFINITY);
+                 }
+ 
++                let b = p[1];
++                let t0 = p[2];
++
+                 let mut total_chi2 = 0.0;
+-                let mut n = 0usize;
+-                for i in 0..self.band.times.len() {
+-                    let model = bazin_flux(a, b, t0, tau_rise, tau_fall, self.band.times[i]);
+-                    let diff = model - self.band.flux[i];
+-                    let var = self.band.flux_err[i].powi(2) + 1e-10;
+-                    total_chi2 += diff * diff / var;
+-                    n += 1;
++                for i in 0..len {
++                    let model = bazin_flux(a, b, t0, inv_tau_rise, inv_tau_fall, times[i]);
++                    let diff = model - fluxes[i];
++                    total_chi2 += diff * diff * weights[i];
+                 }
+-                let penalty = if t0 < -100.0 || t0 > 100.0 || tau_rise < 1e-6 || tau_rise > 1e4 || tau_fall < 1e-6 || tau_fall > 1e4 {
++
++                let penalty = if  t0 < -100.0 || t0 > 100.0 || inv_tau_rise > 1e6 || inv_tau_rise < 1e-4 || inv_tau_fall > 1e6 || inv_tau_fall < 1e-4 {
+                     1e6
+                 } else {
+                     0.0
+                 };
+-                Ok(total_chi2 / n.max(1) as f64 + penalty)
++
++                let n = len.max(1) as f64;
++                Ok(total_chi2 / n + penalty)
+             }
+             _ => {
+                 let a = p[0].exp();
+-                let beta = p[1];
+                 let gamma = p[2].exp();
+-                let t0 = p[3];
+-                let tau_rise = p[4].exp();
+-                let tau_fall = p[5].exp();
++                let inv_tau_rise: f64 =1.0 / p[4].exp();
++                let inv_tau_fall: f64 =1.0 / p[5].exp();
+                 let sigma_extra = p[6].exp();
+ 
+-                if !a.is_finite() || !gamma.is_finite() || !tau_rise.is_finite() || !tau_fall.is_finite() || !sigma_extra.is_finite() {
+-                    return Ok(1e99);
++                if !a.is_finite() || !gamma.is_finite() || !inv_tau_rise.is_finite() || !inv_tau_fall.is_finite() || !sigma_extra.is_finite() {
++                    return Ok(f64::INFINITY);
+                 }
+ 
++                let t0 = p[3];
++
++                let beta = p[1];
+                 let mut total_chi2 = 0.0;
+-                let mut n = 0usize;
+-                for i in 0..self.band.times.len() {
+-                    let model = match self.variant {
+-                        ModelVariant::Full => villar_flux(a, beta, gamma, t0, tau_rise, tau_fall, self.band.times[i]),
+-                        ModelVariant::DecayOnly | ModelVariant::FastDecay => villar_flux_decay(a, beta, gamma, t0, tau_fall, self.band.times[i]),
+-                        ModelVariant::PowerLaw | ModelVariant::Bazin => unreachable!(),
+-                    };
+-                    let diff = model - self.band.flux[i];
+-                    // Use only observational errors in chi2, not sigma_extra
+-                    let var = self.band.flux_err[i].powi(2) + 1e-10;
+-                    total_chi2 += diff * diff / var;
+-                    n += 1;
+-                }
+-                let penalty = if t0 < -100.0 || t0 > 100.0 || tau_rise < 1e-6 || tau_rise > 1e4 || tau_fall < 1e-6 || tau_fall > 1e4 {
++                match self.variant {
++                    ModelVariant::Full => {
++                        for i in 0..len {
++                            let model = villar_flux(a, beta, gamma, t0, inv_tau_rise, inv_tau_fall, times[i]);
++                            let diff = model - fluxes[i];
++                            total_chi2 += diff * diff * weights[i];
++                        }
++                    }
++                    ModelVariant::DecayOnly | ModelVariant::FastDecay => {
++                        for i in 0..len {
++                            let model = villar_flux_decay(a, beta, gamma, t0, inv_tau_fall, times[i]);
++                            let diff = model - fluxes[i];
++                            total_chi2 += diff * diff * weights[i];
++                        }
++                    }
++                    _ => unreachable!(),
++                };
++
++                // Add penalty for large sigma_extra to prevent overfitting
++                let sigma_penalty = sigma_extra*sigma_extra*100.0;
++                let penalty = if  t0 < -100.0 || t0 > 100.0 || inv_tau_rise > 1e6 || inv_tau_rise < 1e-4 || inv_tau_fall > 1e6 || inv_tau_fall < 1e-4 {
+                     1e6
+                 } else {
+                     0.0
+                 };
+-                // Add penalty for large sigma_extra to prevent overfitting
+-                let sigma_penalty = (sigma_extra / 0.1).powi(2);
+-                Ok(total_chi2 / n.max(1) as f64 + penalty + sigma_penalty)
++                let n = self.band.times.len().max(1) as f64;
++                Ok(total_chi2 / n + penalty + sigma_penalty)
+             }
+         }
+     }
+ }
+ 
+-fn pso_bounds(base: Option<&[f64]>, variant: ModelVariant) -> (Vec<f64>, Vec<f64>) {
++fn pso_bounds(base: Option<&[f64]>, variant: ModelVariant) -> (SVector<f64, 7>, SVector<f64, 7>) {
+     if matches!(variant, ModelVariant::Bazin) {
+         // Bazin model: [a, b (baseline), t0, tau_rise, tau_fall]
+-        let lower = vec![-0.3, -1.0, -100.0, 1e-8, 1e-8];
+-        let upper = vec![0.5, 1.0, 30.0, 3.5, 3.5];
+-        return (lower, upper);
++        let lower = [-0.3, -1.0, -100.0, 1e-8, 1e-8, 0.0, 0.0];
++        let upper = [0.5, 1.0, 30.0, 3.5, 3.5, 0.0, 0.0];
++        return (SVector::from(lower), SVector::from(upper));
+     }
+     if matches!(variant, ModelVariant::PowerLaw) {
+-        let mut lower = vec![-0.5, 0.5, -10.0, -4.0];
+-        let mut upper = vec![0.8, 4.0, 30.0, -1.5];
++        let mut lower = [-0.5, 0.5, -10.0, -4.0, 0.0, 0.0, 0.0];
++        let mut upper = [0.8, 4.0, 30.0, -1.5, 0.0, 0.0, 0.0];
+         if let Some(b) = base {
+-            let span = vec![0.7, 0.5, 5.0, 2.0];
+-            for i in 0..b.len() {
++            let span = [0.7, 0.5, 5.0, 2.0, 0.0, 0.0, 0.0];
++            for i in 0..b.len().min(7) {
+                 lower[i] = (b[i] - span[i]).max(lower[i]);
+                 upper[i] = (b[i] + span[i]).min(upper[i]);
+             }
+         }
+-        return (lower, upper);
++        return (SVector::from(lower), SVector::from(upper));
+     }
+ 
+-    let mut lower = vec![-0.5, 0.0, -8.0, -5.0, -5.0, -5.0, -4.0];
+-    let mut upper = vec![0.8, 0.08, 4.0, 100.0, 6.5, 7.5, -1.5];  // Increased tau_fall max from 6.5 to 7.5 (~1800 days)
++    let mut lower = [-0.5, 0.0, -8.0, -5.0, -5.0, -5.0, -4.0];
++    let mut upper = [0.8, 0.08, 4.0, 100.0, 6.5, 7.5, -1.5];  // Increased tau_fall max from 6.5 to 7.5 (~1800 days)
+     if matches!(variant, ModelVariant::FastDecay) {
+         upper[1] = 0.02;
+         upper[2] = 2.0;
+@@ -186,36 +207,39 @@ fn pso_bounds(base: Option<&[f64]>, variant: ModelVariant) -> (Vec<f64>, Vec<f64
+         lower[5] = -4.0;
+     }
+     if let Some(b) = base {
+-        let span = vec![0.7, 0.01, 1.0, 10.0, 1.0, 1.0, 2.0];
++        let span = [0.7, 0.01, 1.0, 10.0, 1.0, 1.0, 2.0];
+         for i in 0..b.len() {
+             lower[i] = (b[i] - span[i]).max(lower[i]);
+             upper[i] = (b[i] + span[i]).min(upper[i]);
+         }
+     }
+-    (lower, upper)
++    (SVector::from(lower), SVector::from(upper))
+ }
+ 
+-pub fn villar_flux(a: f64, beta: f64, gamma: f64, t0: f64, tau_rise: f64, tau_fall: f64, t: f64) -> f64 {
++#[inline]
++pub fn villar_flux(a: f64, beta: f64, gamma: f64, t0: f64, inv_tau_rise: f64, inv_tau_fall: f64, t: f64) -> f64 {
+     let phase = t - t0;
+-    let sigmoid = 1.0 / (1.0 + (-phase / tau_rise).exp());
++    let sigmoid = 1.0 / (1.0 + (-phase * inv_tau_rise).exp());
+     let piece = if phase < gamma {
+         1.0 - beta * phase
+     } else {
+-        (1.0 - beta * gamma) * ((gamma - phase) / tau_fall).exp()
++        (1.0 - beta * gamma) * ((gamma - phase) * inv_tau_fall).exp()
+     };
+     a * sigmoid * piece
+ }
+ 
+-pub fn villar_flux_decay(a: f64, beta: f64, gamma: f64, t0: f64, tau_fall: f64, t: f64) -> f64 {
++#[inline]
++pub fn villar_flux_decay(a: f64, beta: f64, gamma: f64, t0: f64, inv_tau_fall: f64, t: f64) -> f64 {
+     let phase = t - t0;
+     let piece = if phase < gamma {
+         1.0 - beta * phase
+     } else {
+-        (1.0 - beta * gamma) * ((gamma - phase) / tau_fall).exp()
++        (1.0 - beta * gamma) * ((gamma - phase) * inv_tau_fall).exp()
+     };
+     a * piece
+ }
+ 
++#[inline]
+ pub fn powerlaw_flux(a: f64, alpha: f64, t0: f64, t: f64) -> f64 {
+     let phase = t - t0;
+     // Power law should apply for all observed times (phase > 0)
+@@ -227,13 +251,15 @@ pub fn powerlaw_flux(a: f64, alpha: f64, t0: f64, t: f64) -> f64 {
+     }
+ }
+ 
+-pub fn bazin_flux(a: f64, b: f64, t0: f64, tau_rise: f64, tau_fall: f64, t: f64) -> f64 {
++#[inline]
++pub fn bazin_flux(a: f64, b: f64, t0: f64, inv_tau_rise: f64, inv_tau_fall: f64, t: f64) -> f64 {
+     let dt = t - t0;
+-    let num = (-(dt) / tau_fall).exp();
+-    let den = 1.0 + (-(dt) / tau_rise).exp();
++    let num = (-(dt) * inv_tau_fall).exp();
++    let den = 1.0 + (-(dt) * inv_tau_rise).exp();
+     a * (num / den) + b
+ }
+ 
++#[inline]
+ fn flux_to_mag(flux: f64) -> f64 {
+     -2.5 * flux.log10() + ZP
+ }
+@@ -249,6 +275,15 @@ fn median(xs: &mut [f64]) -> Option<f64> {
+     }
+ }
+ 
++fn get_band_color(band: &str) -> RGBColor {
++    match band {
++        "g" | "ZTF_g" => BLUE,
++        "r" | "ZTF_r" => RED,
++        "i" | "ZTF_i" => GREEN,
++        _ => BLACK,
++    }
++}
++
+ // Compute Full Width at Half Maximum (FWHM) in magnitude space
+ // Finds the time span where magnitude is within 0.75 mag of peak (50% flux)
+ fn compute_fwhm(times: &[f64], mags: &[f64]) -> (f64, f64, f64) {
+@@ -257,7 +292,7 @@ fn compute_fwhm(times: &[f64], mags: &[f64]) -> (f64, f64, f64) {
+     }
+     
+     // Find peak (minimum magnitude)
+-    let peak_mag = mags.iter().cloned().fold(f64::INFINITY, f64::min);
++    let peak_mag = mags.iter().copied().fold(f64::INFINITY, f64::min);
+     let half_max_mag = peak_mag + 0.75;  // 0.75 mag fainter = 50% flux
+     
+     // Find time before peak where mag crosses half maximum (going from faint to bright)
+@@ -348,7 +383,7 @@ fn compute_decay_rate(times: &[f64], mags: &[f64]) -> f64 {
+ 
+ // Adapter function to convert BandData to the tuple format used by parametric fitting
+ // Parametric fitting needs flux values (not magnitudes), so we pass convert_to_mag=false
+-fn read_lightcurve(path: &str) -> Result<HashMap<String, (Vec<f64>, Vec<f64>, Vec<f64>)>, Box<dyn std::error::Error>> {
++fn read_lightcurve(path: &str) -> Result<HashMap<String, (Vec<f64>, Vec<f64>, Vec<f64>)>, Box<dyn std::error::Error + Send + Sync>> {
+     let bands = read_ztf_lightcurve(path, false)?;
+     let result = bands
+         .into_iter()
+@@ -356,15 +391,15 @@ fn read_lightcurve(path: &str) -> Result<HashMap<String, (Vec<f64>, Vec<f64>, Ve
+         .collect();
+     Ok(result)
+ }
+-struct BandPlot {
+-    times_obs: Vec<f64>,
+-    mags_obs: Vec<f64>,
++struct BandPlot <'a> {
++    times_obs: &'a [f64],
++    mags_obs: &'a [f64],
+     mag_errors: Vec<f64>,
+-    times_pred: Vec<f64>,
++    times_pred: &'a [f64],
+     mags_model: Vec<f64>,
+     mags_upper: Vec<f64>,
+     mags_lower: Vec<f64>,
+-    label: String,
++    label: &'a String,
+     chi2: f64,
+     legend_label: String,
+ }
+@@ -375,17 +410,38 @@ struct RefFit {
+     variant: ModelVariant,
+ }
+ 
++
++fn find_scale_norm(data: &BandFitData, sigma_extra: f64, model: impl Fn(f64) -> f64) -> f64 {
++    let mut num = 0.0;
++    let mut den = 0.0;
++    let s2 = sigma_extra * sigma_extra + 1e-10;
++
++    for i in 0..data.times.len() {
++        let m = model(data.times[i]);
++        let y = data.flux[i];
++        let var = data.flux_err[i] * data.flux_err[i] + s2;
++        let w = 1.0 / var;
++        
++        num += m * y * w;
++        den += m * m * w;
++    }
++    
++    if den > 0.0 { num / den } else { 1.0 }
++}
++
+ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, force_variant: Option<ModelVariant>) -> (Vec<f64>, Vec<f64>, Vec<f64>, f64, String, String, Vec<f64>, VillarTimescaleParams) {
+     let run_fit = |base: Option<&[f64]>, variant: ModelVariant, iters: u64, particles: usize| {
++        let rng = SmallRng::from_os_rng();
+         let (lower, upper) = pso_bounds(base, variant);
+-        let solver = ParticleSwarm::new((lower, upper), particles);
+-        let problem = SingleBandVillarCost { band: data.clone(), variant };
++        let solver = ParticleSwarm::new((lower, upper), particles).with_rng_generator(rng);
++        let problem = SingleBandVillarCost { band: data, variant };
+         let res = Executor::new(problem, solver)
+             .configure(|state| state.max_iters(iters))
+             .run()
+             .expect("PSO failed");
+-        let best = res.state().get_best_param().unwrap();
+-        let chi2 = res.state().get_cost();
++        let state = res.state();
++        let best = state.get_best_param().unwrap();
++        let chi2 = state.get_cost();
+         (best.position.clone(), chi2)
+     };
+ 
+@@ -404,32 +460,32 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
+         let base = if use_ref_variant { Some(ref_fit.unwrap().params.as_slice()) } else { None };
+         run_fit(base, ModelVariant::Full, 100, 60)
+     } else {
+-        (vec![], f64::INFINITY)
++        (SVector::<f64, 7>::from_element(f64::NAN), f64::INFINITY)
+     };
+     
+     let (params_fast, chi2_fast) = if try_variants.contains(&ModelVariant::FastDecay) {
+         let base = if use_ref_variant { Some(ref_fit.unwrap().params.as_slice()) } else { None };
+         run_fit(base, ModelVariant::FastDecay, 100, 60)
+     } else {
+-        (vec![], f64::INFINITY)
++        (SVector::<f64, 7>::from_element(f64::NAN), f64::INFINITY)
+     };
+     
+     let (params_power, chi2_power) = if try_variants.contains(&ModelVariant::PowerLaw) {
+         let base = if use_ref_variant { Some(ref_fit.unwrap().params.as_slice()) } else { None };
+         run_fit(base, ModelVariant::PowerLaw, 80, 50)
+     } else {
+-        (vec![], f64::INFINITY)
++        (SVector::<f64, 7>::from_element(f64::NAN), f64::INFINITY)
+     };
+ 
+     let (params_bazin, chi2_bazin) = if try_variants.contains(&ModelVariant::Bazin) {
+         let base = if use_ref_variant { Some(ref_fit.unwrap().params.as_slice()) } else { None };
+         run_fit(base, ModelVariant::Bazin, 100, 60)
+     } else {
+-        (vec![], f64::INFINITY)
++        (SVector::<f64, 7>::from_element(f64::NAN), f64::INFINITY)
+     };
+ 
+     let (params, variant, chi2_best) = {
+-        let mut best = (params_full, ModelVariant::Full, chi2_full);
++        let mut best: (SVector<f64, 7>, ModelVariant, f64) = (params_full, ModelVariant::Full, chi2_full);
+         if chi2_fast < best.2 { best = (params_fast, ModelVariant::FastDecay, chi2_fast); }
+         if chi2_power < best.2 { best = (params_power, ModelVariant::PowerLaw, chi2_power); }
+         if chi2_bazin < best.2 { best = (params_bazin, ModelVariant::Bazin, chi2_bazin); }
+@@ -437,7 +493,7 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
+     };
+ 
+     // If fitting completely failed, return NaN values
+-    if params.is_empty() {
++    if params == SVector::<f64, 7>::from_element(f64::NAN) {
+         let nan_vec = vec![f64::NAN; times_pred.len()];
+         let failed_params = VillarTimescaleParams {
+             band: String::from("unknown"),
+@@ -493,68 +549,70 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
+         }
+     };
+ 
+-    let eval_model = |t: f64| -> f64 {
+-        match variant {
+-            ModelVariant::Full => {
+-                let a = params[0].exp();
+-                let beta = params[1];
+-                let gamma = params[2].exp();
+-                let t0 = params[3];
+-                let tau_rise = params[4].exp();
+-                let tau_fall = params[5].exp();
+-                villar_flux(a, beta, gamma, t0, tau_rise, tau_fall, t)
+-            }
+-            ModelVariant::DecayOnly | ModelVariant::FastDecay => {
+-                let a = params[0].exp();
+-                let beta = params[1];
+-                let gamma = params[2].exp();
+-                let t0 = params[3];
+-                let tau_fall = params[5].exp();
+-                villar_flux_decay(a, beta, gamma, t0, tau_fall, t)
+-            }
+-            ModelVariant::PowerLaw => {
+-                let a = params[0].exp();
+-                let alpha = params[1];
+-                let t0 = params[2];
+-                powerlaw_flux(a, alpha, t0, t)
+-            }
+-            ModelVariant::Bazin => {
+-                let a = params[0].exp();
+-                let b = params[1];
+-                let t0 = params[2];
+-                let tau_rise = params[3].exp();
+-                let tau_fall = params[4].exp();
+-                bazin_flux(a, b, t0, tau_rise, tau_fall, t)
+-            }
++    let (flux_model, scale_norm) = match variant {
++        ModelVariant::Full => {
++            let a = params[0].exp();
++            let beta = params[1];
++            let gamma = params[2].exp();
++            let t0 = params[3];
++            let inv_tau_rise: f64 =1.0 / params[4].exp();
++            let inv_tau_fall: f64 =1.0 / params[5].exp();
++
++            let flux: Vec<f64> = times_pred.iter().map(|&t| villar_flux(a, beta, gamma, t0, inv_tau_rise, inv_tau_fall, t)).collect();
++            let scale = find_scale_norm(data, sigma_extra, |t| {villar_flux(a, beta, gamma, t0, inv_tau_rise, inv_tau_fall, t)});
++
++            (flux, scale)
+         }
+-    };
++        ModelVariant::DecayOnly | ModelVariant::FastDecay => {
++            let a = params[0].exp();
++            let beta = params[1];
++            let gamma = params[2].exp();
++            let t0 = params[3];
++            let inv_tau_fall: f64 =1.0 / params[5].exp();
++
++            let flux: Vec<f64> = times_pred.iter().map(|&t| villar_flux_decay(a, beta, gamma, t0, inv_tau_fall, t)).collect();
++            let scale = find_scale_norm(data, sigma_extra, |t| { villar_flux_decay(a, beta, gamma, t0, inv_tau_fall, t)});
++
++            (flux, scale)
++        }
++        ModelVariant::PowerLaw => {
++            let a = params[0].exp();
++            let alpha = params[1];
++            let t0 = params[2];
++
++            let flux: Vec<f64> = times_pred.iter().map(|&t| powerlaw_flux(a, alpha, t0, t)).collect();
++            let scale = find_scale_norm(data, sigma_extra, |t| {powerlaw_flux(a, alpha, t0, t)});
++
++            (flux, scale)
++        }
++        ModelVariant::Bazin => {
++            let a = params[0].exp();
++            let b = params[1];
++            let t0 = params[2];
++            let inv_tau_rise: f64 =1.0 / params[3].exp();
++            let inv_tau_fall: f64 =1.0 / params[4].exp();
+ 
+-    let flux_model: Vec<f64> = times_pred.iter().map(|t| eval_model(*t)).collect();
++            let flux: Vec<f64>= times_pred.iter().map(|&t| bazin_flux(a, b, t0, inv_tau_rise, inv_tau_fall, t)).collect();
++            let scale = find_scale_norm(data, sigma_extra, |t| { bazin_flux(a, b, t0, inv_tau_rise, inv_tau_fall, t) });
++
++            (flux, scale)
++        }
++    };
+ 
+     // Weighted scale fit in normalized space to avoid forcing model to the observed peak
+-    let mut num = 0.0;
+-    let mut den = 0.0;
+-    for i in 0..data.times.len() {
+-        let m = eval_model(data.times[i]);
+-        let y = data.flux[i];
+-        let var = data.flux_err[i] * data.flux_err[i] + sigma_extra * sigma_extra + 1e-10;
+-        let w = 1.0 / var;
+-        num += m * y * w;
+-        den += m * m * w;
+-    }
+-    let scale_norm = if den > 0.0 { num / den } else { 1.0 };
+     let flux_scale = scale_norm * data.peak_flux_obs;
+-
+-    let mut mags = Vec::new();
+-    let mut mags_upper = Vec::new();
+-    let mut mags_lower = Vec::new();
++    let vec_length = flux_model.len();
++    let mut mags = Vec::with_capacity(vec_length);
++    let mut mags_upper = Vec::with_capacity(vec_length);
++    let mut mags_lower = Vec::with_capacity(vec_length);
++
++    let frac_sigma = (sigma_extra).hypot(data.noise_frac_median);
++    let sigma_mag: f64 = 1.0857 * frac_sigma;
++    let sigma_mag_clamped = sigma_mag.min(0.35);
+     for f in &flux_model {
+         let f_scaled = f * flux_scale; // back to observed flux units
+             let m = flux_to_mag(f_scaled.max(1e-12));
+             // sigma_extra is in normalized flux units (fraction of peak); combine as fractional scatter
+-            let frac_sigma = (sigma_extra).hypot(data.noise_frac_median);
+-            let sigma_mag = 1.0857 * frac_sigma;
+-            let sigma_mag_clamped = sigma_mag.min(0.35);
+         mags.push(m);
+         mags_upper.push(m + sigma_mag_clamped);
+         mags_lower.push(m - sigma_mag_clamped);
+@@ -623,10 +681,10 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
+         powerlaw_index,
+     };
+ 
+-    (mags, mags_upper, mags_lower, chi2_best, format!("{:?}", variant), param_summary, params, timescale_params)
++    (mags, mags_upper, mags_lower, chi2_best, format!("{:?}", variant), param_summary, params.as_slice().to_vec(), timescale_params)
+ }
+ 
+-fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarTimescaleParams>), Box<dyn std::error::Error>> {
++fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarTimescaleParams>), Box<dyn std::error::Error + Send + Sync>> {
+     let object_name = input_path
+         .split('/')
+         .last()
+@@ -640,15 +698,8 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
+     }
+ 
+     // Prepare per-band data
+-    let mut band_plots: Vec<BandPlot> = Vec::new();
+-    let colors: HashMap<&str, RGBColor> = [
+-        ("g", BLUE),
+-        ("r", RED),
+-        ("i", GREEN),
+-        ("ZTF_g", BLUE),
+-        ("ZTF_r", RED),
+-        ("ZTF_i", GREEN),
+-    ].iter().cloned().collect();
++    let data_length = bands_raw.len();
++    let mut band_plots: Vec<BandPlot> = Vec::with_capacity(data_length);
+ 
+     // Determine time grid across bands
+     let mut t_min = f64::INFINITY;
+@@ -666,34 +717,40 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
+         .collect();
+ 
+     // Build fit data for all bands first
+-    let mut band_data: Vec<(String, BandFitData, Vec<f64>)> = Vec::new();
++    let mut band_data: Vec<(String, BandFitData, Vec<f64>)> = Vec::with_capacity(data_length);
+     for (band_name, (times, fluxes, flux_errs)) in bands_raw.iter() {
+         if fluxes.is_empty() {
+             continue;
+         }
+-        let peak_flux = fluxes.iter().cloned().fold(f64::MIN, f64::max);
++        let peak_flux = fluxes.iter().copied().fold(f64::MIN, f64::max);
+         if peak_flux <= 0.0 {
+             continue;
+         }
+-        let normalized_flux: Vec<f64> = fluxes.iter().map(|f| f / peak_flux).collect();
+-        let normalized_err: Vec<f64> = flux_errs.iter().map(|e| e / peak_flux).collect();
+-        let mut frac_noises: Vec<f64> = normalized_flux.iter().zip(normalized_err.iter())
+-            .filter_map(|(f, e)| if *f > 0.0 { Some(e / f) } else { None })
+-            .collect();
+-        let noise_frac_median = median(&mut frac_noises).unwrap_or(0.0);
++        let inv_peak_flux = 1.0 / peak_flux;
++        let normalized_flux: Vec<f64> = fluxes.iter().map(|f| f * inv_peak_flux).collect();
++        let normalized_err: Vec<f64> = flux_errs.iter().map(|e| e * inv_peak_flux).collect();
++        let mut frac_noises = Vec::with_capacity(data_length);
++        frac_noises.extend(
++            fluxes.iter().zip(flux_errs)
++                .filter_map(|(&f, &e)| if f > 0.0 { Some(e / f) } else { None })
++        );
+ 
+-        let mut mags_obs = Vec::new();
++        let noise_frac_median = median(&mut frac_noises).unwrap_or(0.0);
++        let mut mags_obs = Vec::with_capacity(fluxes.len());
+         for f in fluxes {
+             let m = flux_to_mag(*f);
+             mags_obs.push(m);
+         }
+ 
++        // Precompute weights outside of cost loop
++        let inverse_var_calculation: Vec<f64> = normalized_err.iter().map(|e| 1.0 / (e * e + 1e-10)).collect();
+         let fit_data = BandFitData {
+-            times: times.clone(),
++            times: times,
+             flux: normalized_flux,
+             flux_err: normalized_err,
+             noise_frac_median,
+             peak_flux_obs: peak_flux,
++            weights: inverse_var_calculation
+         };
+ 
+         band_data.push((band_name.clone(), fit_data, mags_obs));
+@@ -749,14 +806,14 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
+             .collect();
+ 
+         band_plots.push(BandPlot {
+-            times_obs: fit_data.times.clone(),
+-            mags_obs: mags_obs.clone(),
++            times_obs: &fit_data.times,
++            mags_obs: &mags_obs,
+             mag_errors,
+-            times_pred: times_pred.clone(),
++            times_pred: &times_pred,
+             mags_model,
+             mags_upper,
+             mags_lower,
+-            label: band_name.clone(),
++            label: &band_name,
+             chi2,
+             legend_label,
+         });
+@@ -787,7 +844,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
+         .margin(12)
+         .x_label_area_size(70)
+         .y_label_area_size(90)
+-        .build_cartesian_2d(t_min..t_max, y_top..y_bottom)?;;
++        .build_cartesian_2d(t_min..t_max, y_top..y_bottom)?;
+ 
+     chart.configure_mesh()
+         .x_desc("Time (days)")
+@@ -863,7 +920,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
+     }
+ 
+     for b in &band_plots {
+-        let color = colors.get(b.label.as_str()).unwrap_or(&BLACK);
++        let color = get_band_color(&b.label);
+ 
+         // band uncertainty band
+         if !b.mags_upper.is_empty() && b.mags_upper.len() == b.times_pred.len() {
+@@ -886,17 +943,14 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
+         .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color.stroke_width(2)));
+ 
+         // Error bars for observations
+-        let error_lines: Vec<_> = b.times_obs.iter()
+-            .zip(b.mags_obs.iter())
+-            .zip(b.mag_errors.iter())
+-            .map(|((t, m), err)| {
+-                vec![(*t, m - err), (*t, m + err)]
+-            })
+-            .collect();
+-        
+-        for error_line in error_lines {
+-            chart.draw_series(std::iter::once(PathElement::new(error_line, color.stroke_width(1))))?;
+-        }
++        chart.draw_series(
++            b.times_obs.iter()
++                .zip(b.mags_obs.iter())
++                .zip(b.mag_errors.iter())
++                .map(|((&t, &m), &err)| {
++                    PathElement::new(vec![(t, m - err), (t, m + err)], color.stroke_width(1))
++                })
++        )?;
+         
+         // observations (drawn on top of error bars)
+         chart.draw_series(b.times_obs.iter().zip(b.mags_obs.iter()).map(|(t, m)| {
+@@ -922,7 +976,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
+     Ok((total_fit_time, timescale_params_all))
+ }
+ 
+-fn main() -> Result<(), Box<dyn std::error::Error>> {
++fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+     let args: Vec<String> = std::env::args().collect();
+     let mut targets: Vec<String> = Vec::new();
+     if args.len() >= 2 {
+@@ -953,21 +1007,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
+     fs::create_dir_all(output_dir)?;
+ 
+     let mut total_fit_time = 0.0;
++    let clock_start = Instant::now();
+     let mut all_params: Vec<VillarTimescaleParams> = Vec::new();
+     
+-    for (idx, t) in targets.iter().enumerate() {
+-        println!("\n[{}/{}] Villar fitting {}", idx + 1, targets.len(), t);
+-        match process_file(t, output_dir) {
+-            Ok((fit_time, params)) => {
+-                total_fit_time += fit_time;
+-                all_params.extend(params);
+-            },
+-            Err(e) => eprintln!("Error processing {}: {}", t, e),
+-        }
++    let parallel_results: Vec<_> = targets.par_iter().map(|t| {(t, process_file(t, output_dir))}).collect();
++    let clock_duration = clock_start.elapsed().as_secs_f64();
++
++    for (t, result) in parallel_results {
++         match result{
++                 Ok((fit_time, params)) => {
++                 total_fit_time += fit_time;
++                 all_params.extend(params);
++             },
++         Err(e) => eprintln!("Error processing {}: {}", t, e),
++         }
+     }
+ 
++//    for (idx, t) in targets.iter().enumerate() {
++//        println!("\n[{}/{}] Villar fitting {}", idx + 1, targets.len(), t);
++//        match process_file(t, output_dir) {
++//            Ok((fit_time, params)) => {
++//                total_fit_time += fit_time;
++//                all_params.extend(params);
++//            },
++//            Err(e) => eprintln!("Error processing {}: {}", t, e),
++//        }
++//    }
++
+     // Save timescale parameters to CSV
+     let csv_path = "parametric_timescale_parameters.csv";
++    println!("Number of params found: {}", all_params.len());
+     if !all_params.is_empty() {
+         let mut csv_content = String::from("object,band,variant,rise_time_days,decay_time_days,peak_time_days,chi2,n_obs,fwhm_days,rise_rate_mag_per_day,decay_rate_mag_per_day,powerlaw_amplitude,powerlaw_index\n");
+         for param in &all_params {
+@@ -996,6 +1065,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
+ 
+     println!("\n✓ Completed {} light curves", targets.len());
+     println!("  Plots in {}", output_dir.display());
+-    println!("  Total fitting time: {:.2}s", total_fit_time);
++    println!("  Total fitting time (all cores): {:.2}s", total_fit_time);
++    println!("  Fitting time: {:.2}s", clock_duration);
+     Ok(())
+ }

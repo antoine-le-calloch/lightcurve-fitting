@@ -10,7 +10,8 @@ use argmin::solver::particleswarm::ParticleSwarm;
 use plotters::prelude::*;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
-
+use wide::f64x4;
+// use wide::f64x4;
 use lightcurve_fiting::lightcurve_common::read_ztf_lightcurve;
 
 // Zeropoint consistent with GP plotter
@@ -64,13 +65,9 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
     type Param = SVector<f64, 7>;
     type Output = f64;
 
+    //Rewrite the cost function to avoid any if/else logic in loops
     fn cost(&self, p: &Self::Param) -> Result<Self::Output, ArgminError> {
-        let times = &self.band.times;
-        let fluxes = &self.band.flux;
-        let weights = &self.band.weights;
         let len = self.band.times.len();
-        assert!(self.band.flux.len() == len && self.band.weights.len() == len);
-
         match self.variant {
             ModelVariant::PowerLaw => {
                 let a = p[0].exp();
@@ -84,15 +81,22 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
                 let t0 = p[2];
                 let sigma_penalty = sigma_extra*sigma_extra*100.0;
 
-                let mut total_chi2 = 0.0;
-                for i in 0..len {
-                    let model = powerlaw_flux(a, alpha, t0, times[i]);
-                    let diff = model - fluxes[i];
-                    total_chi2 += diff * diff * weights[i];
-                }
+                let diff_first = self.band.times.first().unwrap() - t0;
+                if diff_first <= 0.0 {
+                    return Ok(1e9 - diff_first) 
+                } 
+                
+                // Times are sorted so dont need any if statments within the loop
+                let total_chi2: f64 = self.band.times.iter()
+                    .zip(self.band.flux.iter())
+                    .zip(self.band.weights.iter())
+                    .map(|((&t, &f), &w)| {
+                        let model = a * (t-t0).powf(-alpha);
+                        let diff = model - f;
+                        diff * diff * w
+                    }).sum();
 
                 let n = len.max(1) as f64;
-                // Add penalty for large sigma_extra to prevent overfitting
                 let penalty = if t0 < -100.0 || t0 > 50.0 || alpha < 0.0 || alpha > 5.0 {
                     1e6
                 } else {
@@ -114,13 +118,16 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
 
                 let b = p[1];
                 let t0 = p[2];
+                
 
-                let mut total_chi2 = 0.0;
-                for i in 0..len {
-                    let model = bazin_flux(a, b, t0, inv_tau_rise, inv_tau_fall, times[i]);
-                    let diff = model - fluxes[i];
-                    total_chi2 += diff * diff * weights[i];
-                }
+                let total_chi2: f64 = self.band.times.iter()
+                    .zip(self.band.flux.iter())
+                    .zip(self.band.weights.iter())
+                    .map(|((&t, &f), &w)| {
+                        let model = bazin_flux(a, b, t0, inv_tau_rise, inv_tau_fall, t);
+                        let diff = model - f;
+                        diff * diff * w
+                    }).sum();
 
                 let penalty = if  t0 < -100.0 || t0 > 100.0 || inv_tau_rise > 1e6 || inv_tau_rise < 1e-4 || inv_tau_fall > 1e6 || inv_tau_fall < 1e-4 {
                     1e6
@@ -147,19 +154,78 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
                 let beta = p[1];
                 let mut total_chi2 = 0.0;
                 match self.variant {
+                    //Villar flux
                     ModelVariant::Full => {
-                        for i in 0..len {
-                            let model = villar_flux(a, beta, gamma, t0, inv_tau_rise, inv_tau_fall, times[i]);
-                            let diff = model - fluxes[i];
-                            total_chi2 += diff * diff * weights[i];
-                        }
+                        let threshold = t0 + gamma;
+                        let index_stop = self.band.times.partition_point(|&t| t < threshold);
+
+                        let times_start = &self.band.times[..index_stop];
+                        let flux_start = &self.band.flux[..index_stop];
+                        let weight_start = &self.band.weights[..index_stop];
+
+                        let times_end = &self.band.times[index_stop..];
+                        let flux_end = &self.band.flux[index_stop..];
+                        let weight_end = &self.band.weights[index_stop..];
+
+                        let mut total_chi2: f64 = times_start.iter()
+                            .zip(flux_start.iter())
+                            .zip(weight_start.iter())
+                            .map(|((&t, &f), &w)| {
+                                let phase = t - t0;
+                                let sigmoid = 1.0 / (1.0 + (-phase * inv_tau_rise).exp());
+                                let piece = 1.0 - beta * phase;
+                                let model = a*sigmoid*piece;
+                                let diff = model - f;
+                                diff * diff * w
+                            }).sum();
+
+                        total_chi2 += times_end.iter()
+                            .zip(flux_end.iter())
+                            .zip(weight_end.iter())
+                            .map(|((&t, &f), &w)| {
+                                let phase = t - t0;
+                                let sigmoid = 1.0 / (1.0 + (-phase * inv_tau_rise).exp());
+                                let piece = (1.0 - beta * gamma) * ((gamma - phase) * inv_tau_fall).exp();
+                                let model = a*sigmoid*piece;
+                                let diff = model - f;
+                                diff * diff * w
+                            }).sum::<f64>();
                     }
+
+                    //Villar flux decay
                     ModelVariant::DecayOnly | ModelVariant::FastDecay => {
-                        for i in 0..len {
-                            let model = villar_flux_decay(a, beta, gamma, t0, inv_tau_fall, times[i]);
-                            let diff = model - fluxes[i];
-                            total_chi2 += diff * diff * weights[i];
-                        }
+                        let threshold = t0 + gamma;
+                        let index_stop = self.band.times.partition_point(|&t| t < threshold);
+
+                        let times_start = &self.band.times[..index_stop];
+                        let flux_start = &self.band.flux[..index_stop];
+                        let weight_start = &self.band.weights[..index_stop];
+
+                        let times_end = &self.band.times[index_stop..];
+                        let flux_end = &self.band.flux[index_stop..];
+                        let weight_end = &self.band.weights[index_stop..];
+
+                        let mut total_chi2: f64 = times_start.iter()
+                            .zip(flux_start.iter())
+                            .zip(weight_start.iter())
+                            .map(|((&t, &f), &w)| {
+                                let phase = t - t0;
+                                let piece = 1.0 - beta * phase;
+                                let model = a*piece;
+                                let diff = model - f;
+                                diff * diff * w
+                            }).sum();
+
+                        total_chi2 += times_end.iter()
+                            .zip(flux_end.iter())
+                            .zip(weight_end.iter())
+                            .map(|((&t, &f), &w)| {
+                                let phase = t - t0;
+                                let piece = (1.0 - beta * gamma) * ((gamma - phase) * inv_tau_fall).exp();
+                                let model = a*piece;
+                                let diff = model - f;
+                                diff * diff * w
+                            }).sum::<f64>();
                     }
                     _ => unreachable!(),
                 };
@@ -171,7 +237,7 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
                 } else {
                     0.0
                 };
-                let n = self.band.times.len().max(1) as f64;
+                let n = len.max(1) as f64;
                 Ok(total_chi2 / n + penalty + sigma_penalty)
             }
         }
@@ -381,16 +447,31 @@ fn compute_decay_rate(times: &[f64], mags: &[f64]) -> f64 {
     slope
 }
 
-// Adapter function to convert BandData to the tuple format used by parametric fitting
-// Parametric fitting needs flux values (not magnitudes), so we pass convert_to_mag=false
+//Sort lightcurve by times so we can avoid branching logic in hot loops in cost function
 fn read_lightcurve(path: &str) -> Result<HashMap<String, (Vec<f64>, Vec<f64>, Vec<f64>)>, Box<dyn std::error::Error + Send + Sync>> {
     let bands = read_ztf_lightcurve(path, false)?;
     let result = bands
         .into_iter()
-        .map(|(filter, bd)| (filter, (bd.times, bd.mags, bd.errors)))
+        .map(|(filter, bd)| {   
+            if bd.times.windows(2).all(|w| w[0] <= w[1]) {
+                return (filter, (bd.times, bd.mags, bd.errors));
+            }
+
+            let len = bd.times.len();
+            let mut indices: Vec<usize> = (0..len).collect();
+            indices.sort_unstable_by(|&i, &j| bd.times[i].total_cmp(&bd.times[j]));
+
+            let times: Vec<f64> = indices.iter().map(|&i| bd.times[i]).collect();
+            let mags: Vec<f64>  = indices.iter().map(|&i| bd.mags[i]).collect();
+            let errors: Vec<f64> = indices.iter().map(|&i| bd.errors[i]).collect();
+
+            (filter, (times, mags, errors))
+        })
         .collect();
+
     Ok(result)
 }
+
 struct BandPlot <'a> {
     times_obs: &'a [f64],
     mags_obs: &'a [f64],
