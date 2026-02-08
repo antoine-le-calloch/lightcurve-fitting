@@ -833,13 +833,14 @@ impl CostFunction for PsoCost {
 
         // Renormalize MetzgerKN: model peaks at phase~0.01d but observations
         // are normalized by max(observed flux) which occurs later.
+        // Clamp scale factor to [0.1, 10.0] to prevent numerical instability.
         if self.model == SviModel::MetzgerKN {
             let max_pred = preds.iter().zip(self.is_upper.iter())
                 .filter(|(_, is_up)| !**is_up)
                 .map(|(p, _)| *p)
                 .fold(f64::NEG_INFINITY, f64::max);
             if max_pred > 1e-10 && max_pred.is_finite() {
-                let scale = 1.0 / max_pred;
+                let scale = (1.0 / max_pred).clamp(0.1, 10.0);
                 for pred in preds.iter_mut() { *pred *= scale; }
             }
         }
@@ -1204,13 +1205,19 @@ fn svi_fit(
 
             // Renormalize MetzgerKN: model peaks at phase~0.01d but observations
             // are normalized by max(observed flux) at detection times.
+            // Clamp scale to [0.1, 10.0]; skip sample if clamping is too severe.
             if model == SviModel::MetzgerKN {
                 let max_pred = preds.iter().zip(data.is_upper.iter())
                     .filter(|(_, is_up)| !**is_up)
                     .map(|(p, _)| *p)
                     .fold(f64::NEG_INFINITY, f64::max);
                 if max_pred > 1e-10 && max_pred.is_finite() {
-                    let scale = 1.0 / max_pred;
+                    let raw_scale = 1.0 / max_pred;
+                    let scale = raw_scale.clamp(0.1, 10.0);
+                    // Skip this MC sample if clamping changed scale by >50%
+                    if (raw_scale - scale).abs() / raw_scale > 0.5 {
+                        continue;
+                    }
                     for pred in preds.iter_mut() { *pred *= scale; }
                     for grad_vec in grads.iter_mut() {
                         for g in grad_vec.iter_mut() { *g *= scale; }
