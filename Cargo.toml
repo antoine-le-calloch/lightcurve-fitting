@@ -27,6 +27,7 @@ csv = "1.4.0"
 lightgbm3 = "1.0.10"
 nalgebra = "0.34.1"
 fast-math = "0.1.1"
+wide = "1.1.1"
 
 #[[bin]]
 #name = "fit_villar_nelder_mead"

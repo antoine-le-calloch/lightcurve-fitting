@@ -11,7 +11,6 @@ use plotters::prelude::*;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use wide::f64x4;
-// use wide::f64x4;
 use lightcurve_fiting::lightcurve_common::read_ztf_lightcurve;
 
 // Zeropoint consistent with GP plotter
@@ -65,9 +64,12 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
     type Param = SVector<f64, 7>;
     type Output = f64;
 
-    //Rewrite the cost function to avoid any if/else logic in loops
+    //Vectorized
     fn cost(&self, p: &Self::Param) -> Result<Self::Output, ArgminError> {
         let len = self.band.times.len();
+        let times = &self.band.times;
+        let flux = &self.band.flux;
+        let weights = &self.band.weights;
         match self.variant {
             ModelVariant::PowerLaw => {
                 let a = p[0].exp();
@@ -85,16 +87,37 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
                 if diff_first <= 0.0 {
                     return Ok(1e9 - diff_first) 
                 } 
+
+                let mut total_chi2_4 = f64x4::splat(0.0);
+                let mut t_chunks = times.chunks_exact(4);
+                let mut flux_chunks = flux.chunks_exact(4);
+                let mut weight_chunks = weights.chunks_exact(4);
                 
                 // Times are sorted so dont need any if statments within the loop
-                let total_chi2: f64 = self.band.times.iter()
-                    .zip(self.band.flux.iter())
-                    .zip(self.band.weights.iter())
+                for ((t_c, f_c), w_c) in t_chunks.by_ref().zip(flux_chunks.by_ref()).zip(weight_chunks.by_ref()) {
+                        let t_vec = f64x4::from(t_c.try_into().map(|a: [f64; 4]| a).unwrap());
+                        let f_vec = f64x4::from(f_c.try_into().map(|a: [f64; 4]| a).unwrap());
+                        let w_vec = f64x4::from(w_c.try_into().map(|a: [f64; 4]| a).unwrap());
+
+                        let model = a*(t_vec-t0).powf(-alpha);
+                        let diff = model - f_vec;
+                        total_chi2_4 += diff*diff*w_vec;
+                };
+
+                let mut total_chi2 = total_chi2_4.reduce_add();
+
+                let t_rem = t_chunks.remainder();
+                let f_rem = flux_chunks.remainder();
+                let w_rem = weight_chunks.remainder();
+
+                total_chi2 += t_rem.iter()
+                    .zip(f_rem.iter())
+                    .zip(w_rem.iter())
                     .map(|((&t, &f), &w)| {
                         let model = a * (t-t0).powf(-alpha);
                         let diff = model - f;
                         diff * diff * w
-                    }).sum();
+                    }).sum::<f64>();
 
                 let n = len.max(1) as f64;
                 let penalty = if t0 < -100.0 || t0 > 50.0 || alpha < 0.0 || alpha > 5.0 {
@@ -118,16 +141,38 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
 
                 let b = p[1];
                 let t0 = p[2];
-                
 
-                let total_chi2: f64 = self.band.times.iter()
-                    .zip(self.band.flux.iter())
-                    .zip(self.band.weights.iter())
+                let mut total_chi2_4 = f64x4::splat(0.0);
+                let mut t_chunks = times.chunks_exact(4);
+                let mut flux_chunks = flux.chunks_exact(4);
+                let mut weight_chunks = weights.chunks_exact(4);
+                
+                // Times are sorted so dont need any if statments within the loop
+                for ((t_c, f_c), w_c) in t_chunks.by_ref().zip(flux_chunks.by_ref()).zip(weight_chunks.by_ref()) {
+                        let t_vec = f64x4::from(t_c.try_into().map(|a: [f64; 4]| a).unwrap());
+                        let f_vec = f64x4::from(f_c.try_into().map(|a: [f64; 4]| a).unwrap());
+                        let w_vec = f64x4::from(w_c.try_into().map(|a: [f64; 4]| a).unwrap());
+
+                        let model = bazin_flux_vec(a, b, t0, inv_tau_rise, inv_tau_fall, t_vec);
+                        let diff = model - f_vec;
+                        total_chi2_4 += diff*diff*w_vec;
+                };
+
+                let mut total_chi2 = total_chi2_4.reduce_add();
+
+                let t_rem = t_chunks.remainder();
+                let f_rem = flux_chunks.remainder();
+                let w_rem = weight_chunks.remainder();
+
+                total_chi2 += t_rem.iter()
+                    .zip(f_rem.iter())
+                    .zip(w_rem.iter())
                     .map(|((&t, &f), &w)| {
                         let model = bazin_flux(a, b, t0, inv_tau_rise, inv_tau_fall, t);
                         let diff = model - f;
                         diff * diff * w
-                    }).sum();
+                    }).sum::<f64>();
+                
 
                 let penalty = if  t0 < -100.0 || t0 > 100.0 || inv_tau_rise > 1e6 || inv_tau_rise < 1e-4 || inv_tau_fall > 1e6 || inv_tau_fall < 1e-4 {
                     1e6
@@ -150,7 +195,6 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
                 }
 
                 let t0 = p[3];
-
                 let beta = p[1];
                 let mut total_chi2 = 0.0;
                 match self.variant {
@@ -167,9 +211,35 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
                         let flux_end = &self.band.flux[index_stop..];
                         let weight_end = &self.band.weights[index_stop..];
 
-                        let mut total_chi2: f64 = times_start.iter()
-                            .zip(flux_start.iter())
-                            .zip(weight_start.iter())
+                        // For start of list
+                        let mut total_chi2_4 = f64x4::splat(0.0);
+                        let mut t_chunks = times_start.chunks_exact(4);
+                        let mut flux_chunks = flux_start.chunks_exact(4);
+                        let mut weight_chunks = weight_start.chunks_exact(4);
+                        
+                        // Times are sorted so dont need any if statments within the loop
+                        for ((t_c, f_c), w_c) in t_chunks.by_ref().zip(flux_chunks.by_ref()).zip(weight_chunks.by_ref()) {
+                                let t_vec = f64x4::from(t_c.try_into().map(|a: [f64; 4]| a).unwrap());
+                                let f_vec = f64x4::from(f_c.try_into().map(|a: [f64; 4]| a).unwrap());
+                                let w_vec = f64x4::from(w_c.try_into().map(|a: [f64; 4]| a).unwrap());
+
+                                let phase = t_vec - t0;
+                                let sigmoid = 1.0 / (1.0 + (-phase * inv_tau_rise).exp());
+                                let piece = 1.0 - beta * phase;
+                                let model = a*sigmoid*piece;
+                                let diff = model - f_vec;
+                                total_chi2_4 += diff*diff*w_vec;
+                        };
+
+                        total_chi2 += total_chi2_4.reduce_add();
+
+                        let t_rem = t_chunks.remainder();
+                        let f_rem = flux_chunks.remainder();
+                        let w_rem = weight_chunks.remainder();
+
+                        total_chi2 += t_rem.iter()
+                            .zip(f_rem.iter())
+                            .zip(w_rem.iter())
                             .map(|((&t, &f), &w)| {
                                 let phase = t - t0;
                                 let sigmoid = 1.0 / (1.0 + (-phase * inv_tau_rise).exp());
@@ -177,11 +247,38 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
                                 let model = a*sigmoid*piece;
                                 let diff = model - f;
                                 diff * diff * w
-                            }).sum();
+                            }).sum::<f64>();
 
-                        total_chi2 += times_end.iter()
-                            .zip(flux_end.iter())
-                            .zip(weight_end.iter())
+
+                        // For end of list 
+                        total_chi2_4 = f64x4::splat(0.0);
+                        let mut t_chunks = times_end.chunks_exact(4);
+                        let mut flux_chunks = flux_end.chunks_exact(4);
+                        let mut weight_chunks = weight_end.chunks_exact(4);
+                        
+                        // Times are sorted so dont need any if statments within the loop
+                        for ((t_c, f_c), w_c) in t_chunks.by_ref().zip(flux_chunks.by_ref()).zip(weight_chunks.by_ref()) {
+                                let t_vec = f64x4::from(t_c.try_into().map(|a: [f64; 4]| a).unwrap());
+                                let f_vec = f64x4::from(f_c.try_into().map(|a: [f64; 4]| a).unwrap());
+                                let w_vec = f64x4::from(w_c.try_into().map(|a: [f64; 4]| a).unwrap());
+
+                                let phase = t_vec - t0;
+                                let sigmoid = 1.0 / (1.0 + (-phase * inv_tau_rise).exp());
+                                let piece = (1.0 - beta * gamma) * ((gamma - phase) * inv_tau_fall).exp();
+                                let model = a*sigmoid*piece;
+                                let diff = model - f_vec;
+                                total_chi2_4 += diff*diff*w_vec;
+                        };
+
+                        total_chi2 += total_chi2_4.reduce_add();
+
+                        let t_rem = t_chunks.remainder();
+                        let f_rem = flux_chunks.remainder();
+                        let w_rem = weight_chunks.remainder();
+
+                        total_chi2 += t_rem.iter()
+                            .zip(f_rem.iter())
+                            .zip(w_rem.iter())
                             .map(|((&t, &f), &w)| {
                                 let phase = t - t0;
                                 let sigmoid = 1.0 / (1.0 + (-phase * inv_tau_rise).exp());
@@ -205,20 +302,81 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
                         let flux_end = &self.band.flux[index_stop..];
                         let weight_end = &self.band.weights[index_stop..];
 
-                        let mut total_chi2: f64 = times_start.iter()
-                            .zip(flux_start.iter())
-                            .zip(weight_start.iter())
+                        // For start of list
+                        let mut total_chi2_4 = f64x4::splat(0.0);
+                        let mut t_chunks = times_start.chunks_exact(4);
+                        let mut flux_chunks = flux_start.chunks_exact(4);
+                        let mut weight_chunks = weight_start.chunks_exact(4);
+                        
+                        // Times are sorted so dont need any if statments within the loop
+                        for ((t_c, f_c), w_c) in t_chunks.by_ref().zip(flux_chunks.by_ref()).zip(weight_chunks.by_ref()) {
+                                let t_arr: [f64; 4] = t_c.try_into().unwrap();
+                                let f_arr: [f64; 4] = f_c.try_into().unwrap();
+                                let w_arr: [f64; 4] = w_c.try_into().unwrap();
+
+                                let t_vec = f64x4::from(t_arr);
+                                let f_vec = f64x4::from(f_arr);
+                                let w_vec = f64x4::from(w_arr);
+
+                                let phase = t_vec - t0;
+                                let sigmoid = 1.0 / (1.0 + (-phase * inv_tau_rise).exp());
+                                let piece = 1.0 - beta * phase;
+                                let model = a*sigmoid*piece;
+                                let diff = model - f_vec;
+                                total_chi2_4 += diff*diff*w_vec;
+                        };
+
+                        total_chi2 += total_chi2_4.reduce_add();
+
+                        let t_rem = t_chunks.remainder();
+                        let f_rem = flux_chunks.remainder();
+                        let w_rem = weight_chunks.remainder();
+
+                        total_chi2 += t_rem.iter()
+                            .zip(f_rem.iter())
+                            .zip(w_rem.iter())
                             .map(|((&t, &f), &w)| {
                                 let phase = t - t0;
+                                let sigmoid = 1.0 / (1.0 + (-phase * inv_tau_rise).exp());
                                 let piece = 1.0 - beta * phase;
-                                let model = a*piece;
+                                let model = a*sigmoid*piece;
                                 let diff = model - f;
                                 diff * diff * w
-                            }).sum();
+                            }).sum::<f64>();
 
-                        total_chi2 += times_end.iter()
-                            .zip(flux_end.iter())
-                            .zip(weight_end.iter())
+
+                        // For end of list 
+                        total_chi2_4 = f64x4::splat(0.0);
+                        let mut t_chunks = times_end.chunks_exact(4);
+                        let mut flux_chunks = flux_end.chunks_exact(4);
+                        let mut weight_chunks = weight_end.chunks_exact(4);
+                        
+                        // Times are sorted so dont need any if statments within the loop
+                        for ((t_c, f_c), w_c) in t_chunks.by_ref().zip(flux_chunks.by_ref()).zip(weight_chunks.by_ref()) {
+                                let t_arr: [f64; 4] = t_c.try_into().unwrap();
+                                let f_arr: [f64; 4] = f_c.try_into().unwrap();
+                                let w_arr: [f64; 4] = w_c.try_into().unwrap();
+
+                                let t_vec = f64x4::from(t_arr);
+                                let f_vec = f64x4::from(f_arr);
+                                let w_vec = f64x4::from(w_arr);
+
+                                let phase = t_vec - t0;
+                                let piece = (1.0 - beta * gamma) * ((gamma - phase) * inv_tau_fall).exp();
+                                let model = a*piece;
+                                let diff = model - f_vec;
+                                total_chi2_4 += diff*diff*w_vec;
+                        };
+
+                        total_chi2 += total_chi2_4.reduce_add();
+
+                        let t_rem = t_chunks.remainder();
+                        let f_rem = flux_chunks.remainder();
+                        let w_rem = weight_chunks.remainder();
+
+                        total_chi2 += t_rem.iter()
+                            .zip(f_rem.iter())
+                            .zip(w_rem.iter())
                             .map(|((&t, &f), &w)| {
                                 let phase = t - t0;
                                 let piece = (1.0 - beta * gamma) * ((gamma - phase) * inv_tau_fall).exp();
@@ -242,6 +400,184 @@ impl <'a> CostFunction for SingleBandVillarCost <'a>{
             }
         }
     }
+
+    //Not vectorized
+    // fn cost(&self, p: &Self::Param) -> Result<Self::Output, ArgminError> {
+    //     let len = self.band.times.len();
+    //     match self.variant {
+    //         ModelVariant::PowerLaw => {
+    //             let a = p[0].exp();
+    //             let sigma_extra = p[3].exp();
+
+    //             if !a.is_finite() || !sigma_extra.is_finite() {
+    //                 return Ok(f64::INFINITY);
+    //             }
+
+    //             let alpha = p[1];
+    //             let t0 = p[2];
+    //             let sigma_penalty = sigma_extra*sigma_extra*100.0;
+
+    //             let diff_first = self.band.times.first().unwrap() - t0;
+    //             if diff_first <= 0.0 {
+    //                 return Ok(1e9 - diff_first) 
+    //             } 
+                
+    //             // Times are sorted so dont need any if statments within the loop
+    //             let total_chi2: f64 = self.band.times.iter()
+    //                 .zip(self.band.flux.iter())
+    //                 .zip(self.band.weights.iter())
+    //                 .map(|((&t, &f), &w)| {
+    //                     let model = a * (t-t0).powf(-alpha);
+    //                     let diff = model - f;
+    //                     diff * diff * w
+    //                 }).sum();
+
+    //             let n = len.max(1) as f64;
+    //             let penalty = if t0 < -100.0 || t0 > 50.0 || alpha < 0.0 || alpha > 5.0 {
+    //                 1e6
+    //             } else {
+    //                 0.0
+    //             };
+
+    //             Ok(total_chi2 / n + penalty + sigma_penalty)
+    //         }
+
+    //         ModelVariant::Bazin => {
+    //             // Bazin: [log_a, b, t0, log_tau_rise, log_tau_fall]
+    //             let a = p[0].exp();
+    //             let inv_tau_rise: f64 =1.0 / p[3].exp();
+    //             let inv_tau_fall: f64 =1.0 / p[4].exp();
+
+    //             if !a.is_finite() || !inv_tau_rise.is_finite() || !inv_tau_fall.is_finite() {
+    //                 return Ok(f64::INFINITY);
+    //             }
+
+    //             let b = p[1];
+    //             let t0 = p[2];
+                
+
+    //             let total_chi2: f64 = self.band.times.iter()
+    //                 .zip(self.band.flux.iter())
+    //                 .zip(self.band.weights.iter())
+    //                 .map(|((&t, &f), &w)| {
+    //                     let model = bazin_flux(a, b, t0, inv_tau_rise, inv_tau_fall, t);
+    //                     let diff = model - f;
+    //                     diff * diff * w
+    //                 }).sum();
+
+    //             let penalty = if  t0 < -100.0 || t0 > 100.0 || inv_tau_rise > 1e6 || inv_tau_rise < 1e-4 || inv_tau_fall > 1e6 || inv_tau_fall < 1e-4 {
+    //                 1e6
+    //             } else {
+    //                 0.0
+    //             };
+
+    //             let n = len.max(1) as f64;
+    //             Ok(total_chi2 / n + penalty)
+    //         }
+    //         _ => {
+    //             let a = p[0].exp();
+    //             let gamma = p[2].exp();
+    //             let inv_tau_rise: f64 =1.0 / p[4].exp();
+    //             let inv_tau_fall: f64 =1.0 / p[5].exp();
+    //             let sigma_extra = p[6].exp();
+
+    //             if !a.is_finite() || !gamma.is_finite() || !inv_tau_rise.is_finite() || !inv_tau_fall.is_finite() || !sigma_extra.is_finite() {
+    //                 return Ok(f64::INFINITY);
+    //             }
+
+    //             let t0 = p[3];
+
+    //             let beta = p[1];
+    //             let mut total_chi2 = 0.0;
+    //             match self.variant {
+    //                 //Villar flux
+    //                 ModelVariant::Full => {
+    //                     let threshold = t0 + gamma;
+    //                     let index_stop = self.band.times.partition_point(|&t| t < threshold);
+
+    //                     let times_start = &self.band.times[..index_stop];
+    //                     let flux_start = &self.band.flux[..index_stop];
+    //                     let weight_start = &self.band.weights[..index_stop];
+
+    //                     let times_end = &self.band.times[index_stop..];
+    //                     let flux_end = &self.band.flux[index_stop..];
+    //                     let weight_end = &self.band.weights[index_stop..];
+
+    //                     total_chi2 += times_start.iter()
+    //                         .zip(flux_start.iter())
+    //                         .zip(weight_start.iter())
+    //                         .map(|((&t, &f), &w)| {
+    //                             let phase = t - t0;
+    //                             let sigmoid = 1.0 / (1.0 + (-phase * inv_tau_rise).exp());
+    //                             let piece = 1.0 - beta * phase;
+    //                             let model = a*sigmoid*piece;
+    //                             let diff = model - f;
+    //                             diff * diff * w
+    //                         }).sum::<f64>();
+
+    //                     total_chi2 += times_end.iter()
+    //                         .zip(flux_end.iter())
+    //                         .zip(weight_end.iter())
+    //                         .map(|((&t, &f), &w)| {
+    //                             let phase = t - t0;
+    //                             let sigmoid = 1.0 / (1.0 + (-phase * inv_tau_rise).exp());
+    //                             let piece = (1.0 - beta * gamma) * ((gamma - phase) * inv_tau_fall).exp();
+    //                             let model = a*sigmoid*piece;
+    //                             let diff = model - f;
+    //                             diff * diff * w
+    //                         }).sum::<f64>();
+    //                 }
+
+    //                 //Villar flux decay
+    //                 ModelVariant::DecayOnly | ModelVariant::FastDecay => {
+    //                     let threshold = t0 + gamma;
+    //                     let index_stop = self.band.times.partition_point(|&t| t < threshold);
+
+    //                     let times_start = &self.band.times[..index_stop];
+    //                     let flux_start = &self.band.flux[..index_stop];
+    //                     let weight_start = &self.band.weights[..index_stop];
+
+    //                     let times_end = &self.band.times[index_stop..];
+    //                     let flux_end = &self.band.flux[index_stop..];
+    //                     let weight_end = &self.band.weights[index_stop..];
+
+    //                     total_chi2 += times_start.iter()
+    //                         .zip(flux_start.iter())
+    //                         .zip(weight_start.iter())
+    //                         .map(|((&t, &f), &w)| {
+    //                             let phase = t - t0;
+    //                             let piece = 1.0 - beta * phase;
+    //                             let model = a*piece;
+    //                             let diff = model - f;
+    //                             diff * diff * w
+    //                         }).sum::<f64>();
+
+    //                     total_chi2 += times_end.iter()
+    //                         .zip(flux_end.iter())
+    //                         .zip(weight_end.iter())
+    //                         .map(|((&t, &f), &w)| {
+    //                             let phase = t - t0;
+    //                             let piece = (1.0 - beta * gamma) * ((gamma - phase) * inv_tau_fall).exp();
+    //                             let model = a*piece;
+    //                             let diff = model - f;
+    //                             diff * diff * w
+    //                         }).sum::<f64>();
+    //                 }
+    //                 _ => unreachable!(),
+    //             };
+
+    //             // Add penalty for large sigma_extra to prevent overfitting
+    //             let sigma_penalty = sigma_extra*sigma_extra*100.0;
+    //             let penalty = if  t0 < -100.0 || t0 > 100.0 || inv_tau_rise > 1e6 || inv_tau_rise < 1e-4 || inv_tau_fall > 1e6 || inv_tau_fall < 1e-4 {
+    //                 1e6
+    //             } else {
+    //                 0.0
+    //             };
+    //             let n = len.max(1) as f64;
+    //             Ok(total_chi2 / n + penalty + sigma_penalty)
+    //         }
+    //     }
+    // }
 }
 
 fn pso_bounds(base: Option<&[f64]>, variant: ModelVariant) -> (SVector<f64, 7>, SVector<f64, 7>) {
@@ -319,6 +655,14 @@ pub fn powerlaw_flux(a: f64, alpha: f64, t0: f64, t: f64) -> f64 {
 
 #[inline]
 pub fn bazin_flux(a: f64, b: f64, t0: f64, inv_tau_rise: f64, inv_tau_fall: f64, t: f64) -> f64 {
+    let dt = t - t0;
+    let num = (-(dt) * inv_tau_fall).exp();
+    let den = 1.0 + (-(dt) * inv_tau_rise).exp();
+    a * (num / den) + b
+}
+
+#[inline]
+pub fn bazin_flux_vec(a: f64, b: f64, t0: f64, inv_tau_rise: f64, inv_tau_fall: f64, t: f64x4) -> f64x4 {
     let dt = t - t0;
     let num = (-(dt) * inv_tau_fall).exp();
     let den = 1.0 + (-(dt) * inv_tau_rise).exp();
@@ -918,136 +1262,136 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
     let y_top = (mag_max + mag_pad).min(25.0);
     let y_bottom = (mag_min - mag_pad).max(15.0);
 
-    let output_path = output_dir.join(format!("{}.png", object_name));
-    let root = BitMapBackend::new(&output_path, (1600, 900)).into_drawing_area();
-    root.fill(&WHITE)?;
-    let mut chart = ChartBuilder::on(&root)
-        .margin(12)
-        .x_label_area_size(70)
-        .y_label_area_size(90)
-        .build_cartesian_2d(t_min..t_max, y_top..y_bottom)?;
+    // let output_path = output_dir.join(format!("{}.png", object_name));
+    // let root = BitMapBackend::new(&output_path, (1600, 900)).into_drawing_area();
+    // root.fill(&WHITE)?;
+    // let mut chart = ChartBuilder::on(&root)
+    //     .margin(12)
+    //     .x_label_area_size(70)
+    //     .y_label_area_size(90)
+    //     .build_cartesian_2d(t_min..t_max, y_top..y_bottom)?;
 
-    chart.configure_mesh()
-        .x_desc("Time (days)")
-        .y_desc("Flux")
-        .x_label_style(("sans-serif", 24))
-        .y_label_style(("sans-serif", 24))
-        .draw()?;
+    // chart.configure_mesh()
+    //     .x_desc("Time (days)")
+    //     .y_desc("Flux")
+    //     .x_label_style(("sans-serif", 24))
+    //     .y_label_style(("sans-serif", 24))
+    //     .draw()?;
 
-    // Draw timescale markers (if available)
-    if !timescale_params_all.is_empty() {
-        let params = &timescale_params_all[0];  // Use the first (only) fitted band
-        let t0 = params.peak_time;
+    // // Draw timescale markers (if available)
+    // if !timescale_params_all.is_empty() {
+    //     let params = &timescale_params_all[0];  // Use the first (only) fitted band
+    //     let t0 = params.peak_time;
         
-        // FWHM shaded region - draw first so it's behind the t0 line
-        let peak_mag = params.peak_mag;
-        // Try to draw FWHM region from fitted model curve regardless of stored FWHM value
-        if !band_plots.is_empty() {
-            let first_band = &band_plots[0];
-            let half_max_mag = peak_mag + 0.75;  // 0.75 mag fainter = 50% flux
+    //     // FWHM shaded region - draw first so it's behind the t0 line
+    //     let peak_mag = params.peak_mag;
+    //     // Try to draw FWHM region from fitted model curve regardless of stored FWHM value
+    //     if !band_plots.is_empty() {
+    //         let first_band = &band_plots[0];
+    //         let half_max_mag = peak_mag + 0.75;  // 0.75 mag fainter = 50% flux
             
-            // Find time bounds for FWHM by scanning the fitted model curve
-            let mut t_before = f64::NAN;
-            let mut t_after = f64::NAN;
+    //         // Find time bounds for FWHM by scanning the fitted model curve
+    //         let mut t_before = f64::NAN;
+    //         let mut t_after = f64::NAN;
             
-            // Find peak index in fitted magnitudes
-            let mut peak_idx = 0;
-            let mut min_mag = f64::INFINITY;
-            for (i, &mag) in first_band.mags_model.iter().enumerate() {
-                if mag < min_mag {
-                    min_mag = mag;
-                    peak_idx = i;
-                }
-            }
+    //         // Find peak index in fitted magnitudes
+    //         let mut peak_idx = 0;
+    //         let mut min_mag = f64::INFINITY;
+    //         for (i, &mag) in first_band.mags_model.iter().enumerate() {
+    //             if mag < min_mag {
+    //                 min_mag = mag;
+    //                 peak_idx = i;
+    //             }
+    //         }
             
-            // Find time before peak where mag crosses half maximum
-            for i in (0..peak_idx).rev() {
-                if first_band.mags_model[i] >= half_max_mag {
-                    t_before = first_band.times_pred[i];
-                    break;
-                }
-            }
+    //         // Find time before peak where mag crosses half maximum
+    //         for i in (0..peak_idx).rev() {
+    //             if first_band.mags_model[i] >= half_max_mag {
+    //                 t_before = first_band.times_pred[i];
+    //                 break;
+    //             }
+    //         }
             
-            // Find time after peak where mag crosses half maximum
-            for i in (peak_idx + 1)..first_band.mags_model.len() {
-                if first_band.mags_model[i] >= half_max_mag {
-                    t_after = first_band.times_pred[i];
-                    break;
-                }
-            }
+    //         // Find time after peak where mag crosses half maximum
+    //         for i in (peak_idx + 1)..first_band.mags_model.len() {
+    //             if first_band.mags_model[i] >= half_max_mag {
+    //                 t_after = first_band.times_pred[i];
+    //                 break;
+    //             }
+    //         }
             
-            // Draw shaded region if both bounds are valid and within plot range
-            if !t_before.is_nan() && !t_after.is_nan() && 
-               t_before >= t_min && t_after <= t_max {
-                chart.draw_series(std::iter::once(plotters::prelude::Polygon::new(
-                    vec![
-                        (t_before, y_top),
-                        (t_after, y_top),
-                        (t_after, y_bottom),
-                        (t_before, y_bottom),
-                    ],
-                    CYAN.mix(0.4).filled()  // More opaque cyan for visibility
-                )))?;
-            }
-        }
+    //         // Draw shaded region if both bounds are valid and within plot range
+    //         if !t_before.is_nan() && !t_after.is_nan() && 
+    //            t_before >= t_min && t_after <= t_max {
+    //             chart.draw_series(std::iter::once(plotters::prelude::Polygon::new(
+    //                 vec![
+    //                     (t_before, y_top),
+    //                     (t_after, y_top),
+    //                     (t_after, y_bottom),
+    //                     (t_before, y_bottom),
+    //                 ],
+    //                 CYAN.mix(0.4).filled()  // More opaque cyan for visibility
+    //             )))?;
+    //         }
+    //     }
         
-        // t0 line (peak) - solid black, drawn on top of FWHM region
-        if t0.is_finite() && t0 >= t_min && t0 <= t_max {
-            chart.draw_series(std::iter::once(PathElement::new(
-                vec![(t0, y_top), (t0, y_bottom)],
-                BLACK.stroke_width(2)
-            )))?;
-        }
-    }
+    //     // t0 line (peak) - solid black, drawn on top of FWHM region
+    //     if t0.is_finite() && t0 >= t_min && t0 <= t_max {
+    //         chart.draw_series(std::iter::once(PathElement::new(
+    //             vec![(t0, y_top), (t0, y_bottom)],
+    //             BLACK.stroke_width(2)
+    //         )))?;
+    //     }
+    // }
 
-    for b in &band_plots {
-        let color = get_band_color(&b.label);
+    // for b in &band_plots {
+    //     let color = get_band_color(&b.label);
 
-        // band uncertainty band
-        if !b.mags_upper.is_empty() && b.mags_upper.len() == b.times_pred.len() {
-            let mut area: Vec<(f64, f64)> = Vec::with_capacity(b.times_pred.len() * 2);
-            for i in 0..b.times_pred.len() {
-                area.push((b.times_pred[i], b.mags_upper[i]));
-            }
-            for i in (0..b.times_pred.len()).rev() {
-                area.push((b.times_pred[i], b.mags_lower[i]));
-            }
-            chart.draw_series(std::iter::once(Polygon::new(area, color.mix(0.18).filled())))?;
-        }
+    //     // band uncertainty band
+    //     if !b.mags_upper.is_empty() && b.mags_upper.len() == b.times_pred.len() {
+    //         let mut area: Vec<(f64, f64)> = Vec::with_capacity(b.times_pred.len() * 2);
+    //         for i in 0..b.times_pred.len() {
+    //             area.push((b.times_pred[i], b.mags_upper[i]));
+    //         }
+    //         for i in (0..b.times_pred.len()).rev() {
+    //             area.push((b.times_pred[i], b.mags_lower[i]));
+    //         }
+    //         chart.draw_series(std::iter::once(Polygon::new(area, color.mix(0.18).filled())))?;
+    //     }
 
-        // model line
-        chart.draw_series(LineSeries::new(
-            b.times_pred.iter().zip(b.mags_model.iter()).map(|(t, m)| (*t, *m)),
-            color.stroke_width(2),
-        ))?
-        .label(b.legend_label.clone())
-        .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color.stroke_width(2)));
+    //     // model line
+    //     chart.draw_series(LineSeries::new(
+    //         b.times_pred.iter().zip(b.mags_model.iter()).map(|(t, m)| (*t, *m)),
+    //         color.stroke_width(2),
+    //     ))?
+    //     .label(b.legend_label.clone())
+    //     .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color.stroke_width(2)));
 
-        // Error bars for observations
-        chart.draw_series(
-            b.times_obs.iter()
-                .zip(b.mags_obs.iter())
-                .zip(b.mag_errors.iter())
-                .map(|((&t, &m), &err)| {
-                    PathElement::new(vec![(t, m - err), (t, m + err)], color.stroke_width(1))
-                })
-        )?;
+    //     // Error bars for observations
+    //     chart.draw_series(
+    //         b.times_obs.iter()
+    //             .zip(b.mags_obs.iter())
+    //             .zip(b.mag_errors.iter())
+    //             .map(|((&t, &m), &err)| {
+    //                 PathElement::new(vec![(t, m - err), (t, m + err)], color.stroke_width(1))
+    //             })
+    //     )?;
         
-        // observations (drawn on top of error bars)
-        chart.draw_series(b.times_obs.iter().zip(b.mags_obs.iter()).map(|(t, m)| {
-            Circle::new((*t, *m), 3, color.filled())
-        }))?;
-    }
+    //     // observations (drawn on top of error bars)
+    //     chart.draw_series(b.times_obs.iter().zip(b.mags_obs.iter()).map(|(t, m)| {
+    //         Circle::new((*t, *m), 3, color.filled())
+    //     }))?;
+    // }
 
-    chart.configure_series_labels()
-        .background_style(&WHITE.mix(0.8))
-        .border_style(&BLACK)
-        .label_font(("sans-serif", 30))
-        .margin(20)
-        .draw()?;
+    // chart.configure_series_labels()
+    //     .background_style(&WHITE.mix(0.8))
+    //     .border_style(&BLACK)
+    //     .label_font(("sans-serif", 30))
+    //     .margin(20)
+    //     .draw()?;
 
-    root.present()?;
-    println!("✓ Villar plot {}", output_path.display());
+    // root.present()?;
+    // println!("✓ Villar plot {}", output_path.display());
     
     // Store object name with band in all timescale params
     for param in &mut timescale_params_all {

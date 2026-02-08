@@ -1468,6 +1468,7 @@ dependencies = [
  "serde_with",
  "sklears-core",
  "sklears-gaussian-process",
+ "wide 1.1.1",
 ]
 
 [[package]]

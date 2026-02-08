@@ -9,3 +9,4 @@ perf.data
 perf.data.old
 *.png
 *.csv
+nonparametric_plots
