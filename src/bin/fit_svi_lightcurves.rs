@@ -9,9 +9,10 @@ use argmin::solver::particleswarm::ParticleSwarm;
 use plotters::prelude::*;
 use rayon::prelude::*;
 
-use lightcurve_fiting::lightcurve_common::read_ztf_lightcurve;
+use lightcurve_fiting::lightcurve_common::{read_lightcurve_auto, detect_flux_zeropoint};
 
-const ZP: f64 = 23.9;
+// Default zero-point; overridden per-file by detect_flux_zeropoint()
+const ZP_DEFAULT: f64 = 23.9;
 
 // Physical constants (CGS)
 const MSUN_CGS: f64 = 1.989e33; // grams
@@ -1782,8 +1783,8 @@ struct BandFitData {
     peak_flux_obs: f64,
 }
 
-fn flux_to_mag(flux: f64) -> f64 {
-    -2.5 * flux.log10() + ZP
+fn flux_to_mag(flux: f64, zp: f64) -> f64 {
+    -2.5 * flux.log10() + zp
 }
 
 fn median_f64(xs: &mut [f64]) -> Option<f64> {
@@ -1815,6 +1816,7 @@ fn posterior_predict(
     times: &[f64],
     peak_flux: f64,
     n_posterior_samples: usize,
+    zp: f64,
 ) -> PosteriorPrediction {
     let n_params = result.model.n_params();
     let n_times = times.len();
@@ -1837,7 +1839,7 @@ fn posterior_predict(
         let flux_norms = eval_model_batch(result.model, &params, times);
         for (ti, flux_norm) in flux_norms.iter().enumerate() {
             let flux_abs = flux_norm * peak_flux;
-            let mag = flux_to_mag(flux_abs.max(1e-12));
+            let mag = flux_to_mag(flux_abs.max(1e-12), zp);
             all_mags[ti].push(mag);
         }
     }
@@ -2005,7 +2007,7 @@ fn plot_results(
 fn read_lightcurve(
     path: &str,
 ) -> Result<HashMap<String, (Vec<f64>, Vec<f64>, Vec<f64>)>, Box<dyn std::error::Error>> {
-    let bands = read_ztf_lightcurve(path, false)?;
+    let bands = read_lightcurve_auto(path, false)?;
     let result = bands
         .into_iter()
         .map(|(filter, bd)| (filter, (bd.times, bd.mags, bd.errors)))
@@ -2049,6 +2051,7 @@ fn process_file(
         .unwrap_or("unknown")
         .trim_end_matches(".csv");
 
+    let zp = detect_flux_zeropoint(input_path);
     let bands_raw = read_lightcurve(input_path)?;
     if bands_raw.is_empty() {
         return Ok(vec![]);
@@ -2083,7 +2086,7 @@ fn process_file(
             .collect();
         let noise_frac_median = median_f64(&mut frac_noises).unwrap_or(0.0);
 
-        let mags_obs: Vec<f64> = fluxes.iter().map(|f| flux_to_mag(*f)).collect();
+        let mags_obs: Vec<f64> = fluxes.iter().map(|f| flux_to_mag(*f, zp)).collect();
 
         let fit_data = BandFitData {
             times: times.clone(),
@@ -2188,7 +2191,7 @@ fn process_file(
         for i in 0..data.times.len() {
             let pred_flux = svi_preds[i] * data.peak_flux_obs;
             if pred_flux > 0.0 && data.flux[i] > 0.0 {
-                let mag_pred = flux_to_mag(pred_flux);
+                let mag_pred = flux_to_mag(pred_flux, zp);
                 let mag_obs = mags_obs[i];
                 let mag_err = 1.0857 * data.flux_err[i] / data.flux[i];
                 if mag_err > 0.0 {
@@ -2216,7 +2219,7 @@ fn process_file(
         });
 
         if do_plot {
-            let pred = posterior_predict(&svi_result, &times_pred, data.peak_flux_obs, 200);
+            let pred = posterior_predict(&svi_result, &times_pred, data.peak_flux_obs, 200, zp);
             let mag_errors: Vec<f64> = data
                 .flux_err
                 .iter()

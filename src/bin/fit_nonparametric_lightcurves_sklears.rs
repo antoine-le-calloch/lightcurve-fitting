@@ -10,7 +10,7 @@ use std::fs;
 use std::path::Path;
 use std::f64::consts::LN_10;
 use std::time::Instant;
-use lightcurve_fiting::lightcurve_common::{BandData, read_ztf_lightcurve, median, extract_rise_timescale, extract_decay_timescale, compute_fwhm, compute_rise_rate, compute_decay_rate};
+use lightcurve_fiting::lightcurve_common::{BandData, read_lightcurve_auto, median, extract_rise_timescale, extract_decay_timescale, compute_fwhm, compute_rise_rate, compute_decay_rate};
 
 struct FastGP {
     base: GaussianProcessRegressor<Untrained>,
@@ -238,7 +238,7 @@ fn compute_predictive_features(
 
 fn process_file(input_path: &str, output_dir: &Path, do_plot: bool) -> Result<(f64, Vec<TimescaleParams>), Box<dyn std::error::Error>> {
     let object_name = input_path.split('/').last().unwrap_or("unknown").trim_end_matches(".csv");
-    let bands = read_ztf_lightcurve(input_path, true)?;;
+    let bands = read_lightcurve_auto(input_path, true)?;
     if bands.is_empty() { eprintln!("No valid data found in {}", input_path); return Ok((0.0, Vec::new())); }
 
     let mut t_min = f64::INFINITY; let mut t_max = f64::NEG_INFINITY;

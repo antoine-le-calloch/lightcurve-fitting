@@ -107,6 +107,178 @@ pub fn read_ztf_lightcurve(path: &str, convert_to_mag: bool) -> Result<HashMap<S
     Ok(bands)
 }
 
+/// Read an LSST-format lightcurve CSV file.
+///
+/// Supports two sub-formats (auto-detected from header):
+///   1. night,band,expMidptMJD,mag,magerr,flux_corrected,flux_corrected_err,fluxlim,magLim
+///   2. night,band,expMidptMJD,psfDiffFlux,psfDiffFluxErr,fluxlim,flux_corrected,flux_corrected_err
+///
+/// Uses flux_corrected / flux_corrected_err (nJy) as the primary data columns.
+/// When convert_to_mag is true and format 1 has valid mag/magerr, those are used directly;
+/// otherwise flux_corrected is converted with ZP = 31.4 (AB mag for nJy).
+pub fn read_lsst_lightcurve(path: &str, convert_to_mag: bool) -> Result<HashMap<String, BandData>, Box<dyn std::error::Error>> {
+    let contents = fs::read_to_string(path)?;
+    let mut lines_iter = contents.lines();
+
+    // Parse header to find column indices
+    let header = lines_iter.next().ok_or("Empty file")?;
+    let cols: Vec<&str> = header.split(',').collect();
+    let col_idx = |name: &str| cols.iter().position(|c| *c == name);
+
+    let idx_mjd = col_idx("expMidptMJD").ok_or("Missing expMidptMJD column")?;
+    let idx_band = col_idx("band").ok_or("Missing band column")?;
+    let idx_flux = col_idx("flux_corrected");
+    let idx_flux_err = col_idx("flux_corrected_err");
+    let idx_mag = col_idx("mag");
+    let idx_magerr = col_idx("magerr");
+
+    let lines_vec: Vec<&str> = lines_iter.collect();
+
+    // First pass: find minimum MJD
+    let mut mjd_min = f64::INFINITY;
+    for line in &lines_vec {
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() > idx_mjd {
+            if let Ok(mjd) = parts[idx_mjd].parse::<f64>() {
+                mjd_min = mjd_min.min(mjd);
+            }
+        }
+    }
+
+    // Dedup: keep lowest-error observation per (band, MJD_rounded)
+    // value stored: (flux_or_mag, mjd, error, band, has_direct_mag)
+    let mut epoch_best: HashMap<(String, u64), (f64, f64, f64, bool)> = HashMap::new();
+
+    for line in &lines_vec {
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() <= idx_mjd || parts.len() <= idx_band {
+            continue;
+        }
+
+        let mjd: f64 = match parts[idx_mjd].parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let band = parts[idx_band].trim().to_string();
+
+        // Try to get flux_corrected and flux_corrected_err
+        let flux_val = idx_flux.and_then(|i| parts.get(i)).and_then(|s| s.parse::<f64>().ok());
+        let flux_err_val = idx_flux_err.and_then(|i| parts.get(i)).and_then(|s| s.parse::<f64>().ok());
+
+        // Try to get direct mag/magerr (format 1)
+        let mag_val = idx_mag.and_then(|i| parts.get(i)).and_then(|s| s.parse::<f64>().ok());
+        let magerr_val = idx_magerr.and_then(|i| parts.get(i)).and_then(|s| s.parse::<f64>().ok());
+
+        // Decide which value to use
+        let (value, error, has_direct_mag) = if convert_to_mag {
+            // Prefer direct mag if available and valid
+            if let (Some(mag), Some(magerr)) = (mag_val, magerr_val) {
+                if magerr > 0.0 && mag.is_finite() {
+                    (mag, magerr, true)
+                } else if let (Some(flux), Some(ferr)) = (flux_val, flux_err_val) {
+                    if flux > 0.0 && ferr > 0.0 {
+                        let mag = -2.5 * flux.log10() + 31.4;
+                        let mag_err = 1.0857 * (ferr / flux);
+                        (mag, mag_err, false)
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            } else if let (Some(flux), Some(ferr)) = (flux_val, flux_err_val) {
+                if flux > 0.0 && ferr > 0.0 {
+                    let mag = -2.5 * flux.log10() + 31.4;
+                    let mag_err = 1.0857 * (ferr / flux);
+                    (mag, mag_err, false)
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        } else {
+            // Flux mode: use flux_corrected
+            if let (Some(flux), Some(ferr)) = (flux_val, flux_err_val) {
+                if ferr > 0.0 && (flux > 0.0 || !convert_to_mag) {
+                    (flux, ferr, false)
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        };
+
+        let mjd_rounded = (mjd * 1e6).round() as u64;
+        let key = (band, mjd_rounded);
+        epoch_best
+            .entry(key)
+            .and_modify(|entry| {
+                if error < entry.2 {
+                    *entry = (value, mjd, error, has_direct_mag);
+                }
+            })
+            .or_insert((value, mjd, error, has_direct_mag));
+    }
+
+    // Bulk-start filter: discard early observations before median_time - 50 days
+    let mut all_times: Vec<f64> = epoch_best.values().map(|(_, mjd, _, _)| *mjd).collect();
+    all_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let bulk_start = if !all_times.is_empty() {
+        all_times[all_times.len() / 2] - 50.0
+    } else {
+        mjd_min
+    };
+
+    let mut bands: HashMap<String, BandData> = HashMap::new();
+    for ((filter, _), (value, mjd, error, _)) in &epoch_best {
+        if mjd < &bulk_start {
+            continue;
+        }
+        let delta_t = mjd - mjd_min;
+        let band = bands.entry(filter.clone()).or_insert_with(|| BandData {
+            times: Vec::new(),
+            mags: Vec::new(),
+            errors: Vec::new(),
+        });
+        band.times.push(delta_t);
+        band.mags.push(*value);
+        band.errors.push(*error);
+    }
+
+    Ok(bands)
+}
+
+/// Auto-detect lightcurve format and read accordingly.
+///
+/// Checks the CSV header to determine whether the file is ZTF format
+/// (mjd,flux,flux_err,filter) or LSST format (night,band,expMidptMJD,...).
+pub fn read_lightcurve_auto(path: &str, convert_to_mag: bool) -> Result<HashMap<String, BandData>, Box<dyn std::error::Error>> {
+    let contents = fs::read_to_string(path)?;
+    let header = contents.lines().next().unwrap_or("");
+
+    if header.starts_with("night,band,") || header.contains("expMidptMJD") {
+        drop(contents); // release before re-reading in sub-function
+        read_lsst_lightcurve(path, convert_to_mag)
+    } else {
+        drop(contents);
+        read_ztf_lightcurve(path, convert_to_mag)
+    }
+}
+
+/// Detect the flux zero-point for a lightcurve file.
+/// Returns 31.4 for LSST (nJy) files, 23.9 for ZTF (μJy) files.
+pub fn detect_flux_zeropoint(path: &str) -> f64 {
+    if let Ok(contents) = fs::read_to_string(path) {
+        let header = contents.lines().next().unwrap_or("");
+        if header.starts_with("night,band,") || header.contains("expMidptMJD") {
+            return 31.4; // LSST nJy
+        }
+    }
+    23.9 // ZTF μJy
+}
+
 pub fn median(values: &mut [f64]) -> Option<f64> {
     if values.is_empty() { return None; }
     values.sort_by(|a, b| a.partial_cmp(b).unwrap());

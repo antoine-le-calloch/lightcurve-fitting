@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 use std::f64::consts::LN_10;
 use std::time::Instant;
-use lightcurve_fiting::lightcurve_common::{BandData, read_ztf_lightcurve, median, extract_rise_timescale, extract_decay_timescale, compute_fwhm, compute_rise_rate, compute_decay_rate};
+use lightcurve_fiting::lightcurve_common::{BandData, read_lightcurve_auto, median, extract_rise_timescale, extract_decay_timescale, compute_fwhm, compute_rise_rate, compute_decay_rate};
 /// Fit a single egobox GP with given initial lengthscale and nugget.
 /// Returns the trained GP or None on failure.
 fn fit_egobox_gp(
@@ -326,7 +326,7 @@ fn process_file(input_path: &str, output_dir: &Path, do_plot: bool) -> Result<(f
         .unwrap_or("unknown")
         .trim_end_matches(".csv");
 
-    let bands = read_ztf_lightcurve(input_path, true)?;;
+    let bands = read_lightcurve_auto(input_path, true)?;
 
     if bands.is_empty() {
         eprintln!("No valid data found in {}", input_path);

@@ -2829,8 +2829,6 @@ checksum = "56199f7ddabf13fe5074ce809e7d3f42b42ae711800501b5b16ea82ad029c39d"
 [[package]]
 name = "sklears-core"
 version = "0.1.0-beta.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d0046e4b6381e6f812006c8ff8afcd5b56512073fbdaeef62dde4409400502d"
 dependencies = [
  "approx 0.5.1",
  "bytemuck",
@@ -2856,8 +2854,6 @@ dependencies = [
 [[package]]
 name = "sklears-gaussian-process"
 version = "0.1.0-beta.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d934dafb021a3b75cfd8034b59bbb72ab1fe4c538c6dd07fc6611dbe36113f0"
 dependencies = [
  "approx 0.5.1",
  "scirs2-core 0.1.1",
@@ -2873,8 +2869,6 @@ dependencies = [
 [[package]]
 name = "sklears-multiclass"
 version = "0.1.0-beta.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da50145d1e34b51df2a67994f737813909dc162ef01cfde79cba74e7546c1d7e"
 dependencies = [
  "rayon",
  "scirs2-autograd 0.1.1",
@@ -2887,8 +2881,6 @@ dependencies = [
 [[package]]
 name = "sklears-utils"
 version = "0.1.0-beta.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39c1b2ca464d43cedeba68c07707ad70f907954a7c83d3607a2ae03588a16b2e"
 dependencies = [
  "chrono",
  "lazy_static",
@@ -2981,7 +2973,7 @@ version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dca58a33be2188d4edc71534f8bafa826e787cc28ca1c47f31be3423f0d6e55"
 dependencies = [
- "ndarray 0.15.6",
+ "ndarray 0.17.2",
  "num-complex",
  "num-traits",
  "smallvec",
