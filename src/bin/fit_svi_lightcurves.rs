@@ -829,7 +829,21 @@ impl CostFunction for PsoCost {
         let se_idx = self.model.sigma_extra_idx();
         let sigma_extra = p[se_idx].exp();
         let sigma_extra_sq = sigma_extra * sigma_extra;
-        let preds = eval_model_batch(self.model, p, &self.times);
+        let mut preds = eval_model_batch(self.model, p, &self.times);
+
+        // Renormalize MetzgerKN: model peaks at phase~0.01d but observations
+        // are normalized by max(observed flux) which occurs later.
+        if self.model == SviModel::MetzgerKN {
+            let max_pred = preds.iter().zip(self.is_upper.iter())
+                .filter(|(_, is_up)| !**is_up)
+                .map(|(p, _)| *p)
+                .fold(f64::NEG_INFINITY, f64::max);
+            if max_pred > 1e-10 && max_pred.is_finite() {
+                let scale = 1.0 / max_pred;
+                for pred in preds.iter_mut() { *pred *= scale; }
+            }
+        }
+
         let n = self.times.len().max(1) as f64;
         let mut neg_ll = 0.0;
         for i in 0..self.times.len() {
@@ -1185,8 +1199,24 @@ fn svi_fit(
 
             // Compute log-likelihood and its gradient w.r.t. theta
             // using batch evaluation (required for sequential models like MetzgerKN)
-            let preds = eval_model_batch(model, &theta, &data.times);
-            let grads = eval_model_grad_batch(model, &theta, &data.times);
+            let mut preds = eval_model_batch(model, &theta, &data.times);
+            let mut grads = eval_model_grad_batch(model, &theta, &data.times);
+
+            // Renormalize MetzgerKN: model peaks at phase~0.01d but observations
+            // are normalized by max(observed flux) at detection times.
+            if model == SviModel::MetzgerKN {
+                let max_pred = preds.iter().zip(data.is_upper.iter())
+                    .filter(|(_, is_up)| !**is_up)
+                    .map(|(p, _)| *p)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                if max_pred > 1e-10 && max_pred.is_finite() {
+                    let scale = 1.0 / max_pred;
+                    for pred in preds.iter_mut() { *pred *= scale; }
+                    for grad_vec in grads.iter_mut() {
+                        for g in grad_vec.iter_mut() { *g *= scale; }
+                    }
+                }
+            }
 
             let mut log_lik = 0.0;
             let mut dll_dtheta = vec![0.0; n_params];
