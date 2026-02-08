@@ -34,26 +34,26 @@ pub fn get_alert_properties(alert: &ZtfAlertForEnrichment) -> (
 ) {
     let candidate = &alert.candidate.candidate;
     let programid = candidate.programid;
-    let ssdistnr = candidate.ssdistnr.unwrap_or(f64::INFINITY);
-    let ssmagnr = candidate.ssmagnr.unwrap_or(f64::INFINITY);
+    let ssdistnr = candidate.ssdistnr.unwrap_or(f32::INFINITY);
+    let ssmagnr = candidate.ssmagnr.unwrap_or(f32::INFINITY);
     let is_rock = ssdistnr >= 0.0 && ssdistnr < 12.0 && ssmagnr >= 0.0;
 
     let sgscore1 = candidate.sgscore1.unwrap_or(0.0);
     let sgscore2 = candidate.sgscore2.unwrap_or(0.0);
     let sgscore3 = candidate.sgscore3.unwrap_or(0.0);
-    let distpsnr1 = candidate.distpsnr1.unwrap_or(f64::INFINITY);
-    let distpsnr2 = candidate.distpsnr2.unwrap_or(f64::INFINITY);
-    let distpsnr3 = candidate.distpsnr3.unwrap_or(f64::INFINITY);
+    let distpsnr1 = candidate.distpsnr1.unwrap_or(f32::INFINITY);
+    let distpsnr2 = candidate.distpsnr2.unwrap_or(f32::INFINITY);
+    let distpsnr3 = candidate.distpsnr3.unwrap_or(f32::INFINITY);
 
-    let srmag1 = candidate.srmag1.unwrap_or(f64::INFINITY);
-    let srmag2 = candidate.srmag2.unwrap_or(f64::INFINITY);
-    let srmag3 = candidate.srmag3.unwrap_or(f64::INFINITY);
-    let sgmag1 = candidate.sgmag1.unwrap_or(f64::INFINITY);
-    let simag1 = candidate.simag1.unwrap_or(f64::INFINITY);
-    let szmag1 = candidate.szmag1.unwrap_or(f64::INFINITY);
+    let srmag1 = candidate.srmag1.unwrap_or(f32::INFINITY);
+    let srmag2 = candidate.srmag2.unwrap_or(f32::INFINITY);
+    let srmag3 = candidate.srmag3.unwrap_or(f32::INFINITY);
+    let sgmag1 = candidate.sgmag1.unwrap_or(f32::INFINITY);
+    let simag1 = candidate.simag1.unwrap_or(f32::INFINITY);
+    let szmag1 = candidate.szmag1.unwrap_or(f32::INFINITY);
 
-    let neargaiabright = candidate.neargaiabright.unwrap_or(f64::INFINITY);
-    let maggaiabright = candidate.maggaiabright.unwrap_or(f64::INFINITY);
+    let neargaiabright = candidate.neargaiabright.unwrap_or(f32::INFINITY);
+    let maggaiabright = candidate.maggaiabright.unwrap_or(f32::INFINITY);
 
     let is_star = (sgscore1 > 0.76 && distpsnr1 >= 0.0 && distpsnr1 <= 2.0)
         || (sgscore1 > 0.2
