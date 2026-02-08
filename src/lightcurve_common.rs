@@ -68,7 +68,7 @@ pub fn read_ztf_lightcurve(path: &str, convert_to_mag: bool) -> Result<HashMap<S
             let flux: f64 = parts[1].parse()?;
             let flux_err: f64 = parts[2].parse()?;
             let filter = parts[3].trim().to_string();
-            if flux > 0.0 && flux_err > 0.0 {
+            if flux_err > 0.0 && (flux > 0.0 || !convert_to_mag) {
                 let mjd_rounded = (mjd * 1e6).round() as u64;
                 let key = (filter, mjd_rounded);
                 epoch_best.entry(key)

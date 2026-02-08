@@ -13,6 +13,32 @@ use lightcurve_fiting::lightcurve_common::{read_ztf_lightcurve};
 // Zeropoint consistent with GP plotter
 const ZP: f64 = 23.9;
 
+/// Log of the standard normal CDF Φ(x)
+/// Used for upper limit likelihood: log Φ((f_upper - f_pred) / σ)
+#[inline]
+fn log_normal_cdf(x: f64) -> f64 {
+    if x > 8.0 {
+        return 0.0; // Φ(x) ≈ 1
+    }
+    if x < -30.0 {
+        return -0.5 * x * x - 0.5 * (2.0 * std::f64::consts::PI).ln() - (-x).ln();
+    }
+    // Use erfc approximation (Abramowitz & Stegun 7.1.26)
+    let z = -x * std::f64::consts::FRAC_1_SQRT_2;
+    let t = 1.0 / (1.0 + 0.3275911 * z.abs());
+    let poly = t
+        * (0.254829592
+            + t * (-0.284496736
+                + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    let erfc_z = poly * (-z * z).exp();
+    let phi = if z >= 0.0 {
+        0.5 * erfc_z
+    } else {
+        1.0 - 0.5 * erfc_z
+    };
+    (phi.max(1e-300)).ln()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ModelVariant {
     Full,
@@ -46,6 +72,8 @@ struct BandFitData {
     flux: Vec<f64>,
     flux_err: Vec<f64>,
     weights: Vec<f64>,      // Precomputed 1.0 / (flux_err² + 1e-10)
+    is_upper: Vec<bool>,    // true if SNR < threshold (non-detection)
+    upper_flux: Vec<f64>,   // Nσ upper limit flux (normalized)
     noise_frac_median: f64,
     peak_flux_obs: f64,
 }
@@ -75,10 +103,17 @@ impl<'a> CostFunction for SingleBandVillarCost<'a> {
                 }
 
                 let mut total_chi2 = 0.0;
+                let mut upper_cost = 0.0;
                 for i in 0..n {
                     let model = powerlaw_flux(a, alpha, t0, self.band.times[i]);
-                    let diff = model - self.band.flux[i];
-                    total_chi2 += diff * diff * self.band.weights[i];
+                    if self.band.is_upper[i] {
+                        let sigma = self.band.flux_err[i].max(1e-10);
+                        let z = (self.band.upper_flux[i] - model) / sigma;
+                        upper_cost -= 2.0 * log_normal_cdf(z);
+                    } else {
+                        let diff = model - self.band.flux[i];
+                        total_chi2 += diff * diff * self.band.weights[i];
+                    }
                 }
                 let penalty = if t0 < -100.0 || t0 > 50.0 || alpha < 0.0 || alpha > 5.0 {
                     1e6
@@ -86,7 +121,7 @@ impl<'a> CostFunction for SingleBandVillarCost<'a> {
                     0.0
                 };
                 let sigma_penalty = sigma_extra * sigma_extra * 100.0;
-                Ok(total_chi2 * inv_n + penalty + sigma_penalty)
+                Ok((total_chi2 + upper_cost) * inv_n + penalty + sigma_penalty)
             }
             ModelVariant::Bazin => {
                 let a = p[0].exp();
@@ -100,20 +135,27 @@ impl<'a> CostFunction for SingleBandVillarCost<'a> {
                 }
 
                 let mut total_chi2 = 0.0;
+                let mut upper_cost = 0.0;
                 for i in 0..n {
                     let dt = self.band.times[i] - t0;
                     let num = (-dt * inv_tau_fall).exp();
                     let den = 1.0 + (-dt * inv_tau_rise).exp();
                     let model = a * (num / den) + b;
-                    let diff = model - self.band.flux[i];
-                    total_chi2 += diff * diff * self.band.weights[i];
+                    if self.band.is_upper[i] {
+                        let sigma = self.band.flux_err[i].max(1e-10);
+                        let z = (self.band.upper_flux[i] - model) / sigma;
+                        upper_cost -= 2.0 * log_normal_cdf(z);
+                    } else {
+                        let diff = model - self.band.flux[i];
+                        total_chi2 += diff * diff * self.band.weights[i];
+                    }
                 }
                 let penalty = if t0 < -100.0 || t0 > 100.0 || inv_tau_rise > 1e6 || inv_tau_rise < 1e-4 || inv_tau_fall > 1e6 || inv_tau_fall < 1e-4 {
                     1e6
                 } else {
                     0.0
                 };
-                Ok(total_chi2 * inv_n + penalty)
+                Ok((total_chi2 + upper_cost) * inv_n + penalty)
             }
             _ => {
                 let a = p[0].exp();
@@ -129,6 +171,7 @@ impl<'a> CostFunction for SingleBandVillarCost<'a> {
                 }
 
                 let mut total_chi2 = 0.0;
+                let mut upper_cost = 0.0;
                 for i in 0..n {
                     let phase = self.band.times[i] - t0;
                     let model = match self.variant {
@@ -151,8 +194,14 @@ impl<'a> CostFunction for SingleBandVillarCost<'a> {
                         }
                         ModelVariant::PowerLaw | ModelVariant::Bazin => unreachable!(),
                     };
-                    let diff = model - self.band.flux[i];
-                    total_chi2 += diff * diff * self.band.weights[i];
+                    if self.band.is_upper[i] {
+                        let sigma = self.band.flux_err[i].max(1e-10);
+                        let z = (self.band.upper_flux[i] - model) / sigma;
+                        upper_cost -= 2.0 * log_normal_cdf(z);
+                    } else {
+                        let diff = model - self.band.flux[i];
+                        total_chi2 += diff * diff * self.band.weights[i];
+                    }
                 }
                 let penalty = if t0 < -100.0 || t0 > 100.0 || inv_tau_rise > 1e6 || inv_tau_rise < 1e-4 || inv_tau_fall > 1e6 || inv_tau_fall < 1e-4 {
                     1e6
@@ -160,7 +209,7 @@ impl<'a> CostFunction for SingleBandVillarCost<'a> {
                     0.0
                 };
                 let sigma_penalty = sigma_extra * sigma_extra * 100.0;
-                Ok(total_chi2 * inv_n + penalty + sigma_penalty)
+                Ok((total_chi2 + upper_cost) * inv_n + penalty + sigma_penalty)
             }
         }
     }
@@ -387,6 +436,8 @@ struct BandPlot {
     times_obs: Vec<f64>,
     mags_obs: Vec<f64>,
     mag_errors: Vec<f64>,
+    is_upper: Vec<bool>,
+    upper_limit_mags: Vec<f64>,  // Limiting magnitude for upper limit points
     times_pred: Vec<f64>,
     mags_model: Vec<f64>,
     mags_upper: Vec<f64>,
@@ -559,9 +610,11 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
     let flux_model: Vec<f64> = times_pred.iter().map(|t| eval_model(*t)).collect();
 
     // Weighted scale fit in normalized space to avoid forcing model to the observed peak
+    // Only use detections for scale fitting (skip upper limits)
     let mut num = 0.0;
     let mut den = 0.0;
     for i in 0..data.times.len() {
+        if data.is_upper[i] { continue; }
         let m = eval_model(data.times[i]);
         let y = data.flux[i];
         let var = data.flux_err[i] * data.flux_err[i] + sigma_extra * sigma_extra + 1e-10;
@@ -653,7 +706,7 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
     (mags, mags_upper, mags_lower, chi2_best, format!("{:?}", variant), param_summary, params, timescale_params)
 }
 
-fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarTimescaleParams>), Box<dyn std::error::Error + Send + Sync>> {
+fn process_file(input_path: &str, output_dir: &Path, snr_threshold: f64) -> Result<(f64, Vec<VillarTimescaleParams>), Box<dyn std::error::Error + Send + Sync>> {
     let object_name = input_path
         .split('/')
         .last()
@@ -698,31 +751,71 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
         if fluxes.is_empty() {
             continue;
         }
-        let peak_flux = fluxes.iter().cloned().fold(f64::MIN, f64::max);
+
+        // Flag upper limits: SNR = flux / flux_err < threshold
+        let is_upper: Vec<bool> = fluxes.iter().zip(flux_errs.iter())
+            .map(|(f, e)| {
+                if *e <= 0.0 { return true; }
+                let snr = f / e;
+                snr < snr_threshold
+            })
+            .collect();
+
+        // Peak flux from detections only
+        let peak_flux = fluxes.iter().zip(is_upper.iter())
+            .filter(|&(_, &is_up)| !is_up)
+            .map(|(f, _)| *f)
+            .fold(f64::MIN, f64::max);
         if peak_flux <= 0.0 {
             continue;
         }
+
         let normalized_flux: Vec<f64> = fluxes.iter().map(|f| f / peak_flux).collect();
         let normalized_err: Vec<f64> = flux_errs.iter().map(|e| e / peak_flux).collect();
+
+        // Upper limit flux: Nσ threshold (normalized)
+        let upper_flux_norm: Vec<f64> = flux_errs.iter().zip(is_upper.iter())
+            .map(|(e, &is_up)| {
+                if is_up { snr_threshold * e / peak_flux } else { 0.0 }
+            })
+            .collect();
+
         let mut frac_noises: Vec<f64> = normalized_flux.iter().zip(normalized_err.iter())
-            .filter_map(|(f, e)| if *f > 0.0 { Some(e / f) } else { None })
+            .zip(is_upper.iter())
+            .filter_map(|((f, e), &is_up)| if !is_up && *f > 0.0 { Some(e / f) } else { None })
             .collect();
         let noise_frac_median = median(&mut frac_noises).unwrap_or(0.0);
 
+        // Magnitudes for plotting (only for detections; upper limits get limiting mag)
         let mut mags_obs = Vec::new();
-        for f in fluxes {
-            let m = flux_to_mag(*f);
-            mags_obs.push(m);
+        for (f, &is_up) in fluxes.iter().zip(is_upper.iter()) {
+            if is_up || *f <= 0.0 {
+                // For upper limits or negative flux, use limiting magnitude
+                mags_obs.push(f64::NAN);
+            } else {
+                mags_obs.push(flux_to_mag(*f));
+            }
         }
 
-        let weights: Vec<f64> = normalized_err.iter()
-            .map(|e| 1.0 / (e * e + 1e-10))
+        // Weights: 0 for upper limits (not used in chi-squared branch)
+        let weights: Vec<f64> = normalized_err.iter().zip(is_upper.iter())
+            .map(|(e, &is_up)| if is_up { 0.0 } else { 1.0 / (e * e + 1e-10) })
             .collect();
+
+        let n_upper = is_upper.iter().filter(|&&x| x).count();
+        if n_upper > 0 {
+            eprintln!("  {} {}: {} upper limits (SNR < {:.1}), {} detections",
+                object_name, band_name, n_upper, snr_threshold,
+                fluxes.len() - n_upper);
+        }
+
         let fit_data = BandFitData {
             times: times.clone(),
             flux: normalized_flux,
             flux_err: normalized_err,
             weights,
+            is_upper,
+            upper_flux: upper_flux_norm,
             noise_frac_median,
             peak_flux_obs: peak_flux,
         };
@@ -770,19 +863,40 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
         timescale_params.band = band_name.clone();
         timescale_params_all.push(timescale_params.clone());
 
-        let legend_label = format!("{} ({}; chi2={:.2}; N={})", band_name, param_summary, chi2, fit_data.times.len());
+        let n_det = fit_data.is_upper.iter().filter(|&&x| !x).count();
+        let n_upper = fit_data.is_upper.iter().filter(|&&x| x).count();
+        let legend_label = if n_upper > 0 {
+            format!("{} ({}; chi2={:.2}; N={}, UL={})", band_name, param_summary, chi2, n_det, n_upper)
+        } else {
+            format!("{} ({}; chi2={:.2}; N={})", band_name, param_summary, chi2, fit_data.times.len())
+        };
 
-        eprintln!("  {} fit: chi2={:.3}, N={}", band_name, chi2, fit_data.times.len());
+        eprintln!("  {} fit: chi2={:.3}, N={} ({}det + {}UL)", band_name, chi2, fit_data.times.len(), n_det, n_upper);
 
         let mag_errors: Vec<f64> = fit_data.flux_err.iter()
             .zip(fit_data.flux.iter())
             .map(|(err, flux)| if *flux > 0.0 { 1.0857 * err / flux } else { 0.1 })
             .collect();
 
+        // Compute limiting magnitudes for upper limit points
+        let upper_limit_mags: Vec<f64> = fit_data.upper_flux.iter()
+            .zip(fit_data.is_upper.iter())
+            .map(|(uf, &is_up)| {
+                if is_up {
+                    let uf_abs = uf * fit_data.peak_flux_obs;
+                    if uf_abs > 0.0 { flux_to_mag(uf_abs) } else { f64::NAN }
+                } else {
+                    f64::NAN
+                }
+            })
+            .collect();
+
         band_plots.push(BandPlot {
             times_obs: fit_data.times.clone(),
             mags_obs: mags_obs.clone(),
             mag_errors,
+            is_upper: fit_data.is_upper.clone(),
+            upper_limit_mags,
             times_pred: times_pred.clone(),
             mags_model,
             mags_upper,
@@ -798,13 +912,15 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
         return Ok((0.0, timescale_params_all));
     }
 
-    // Determine mag range
+    // Determine mag range (only from finite values)
     let mut mag_min = f64::INFINITY;
     let mut mag_max = f64::NEG_INFINITY;
     for b in &band_plots {
-        for &m in b.mags_obs.iter().chain(b.mags_model.iter()) {
-            mag_min = mag_min.min(m);
-            mag_max = mag_max.max(m);
+        for &m in b.mags_obs.iter().chain(b.mags_model.iter()).chain(b.upper_limit_mags.iter()) {
+            if m.is_finite() {
+                mag_min = mag_min.min(m);
+                mag_max = mag_max.max(m);
+            }
         }
     }
     let mag_pad = (mag_max - mag_min) * 0.15;
@@ -916,23 +1032,42 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
         .label(b.legend_label.clone())
         .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color.stroke_width(2)));
 
-        // Error bars for observations
-        let error_lines: Vec<_> = b.times_obs.iter()
-            .zip(b.mags_obs.iter())
-            .zip(b.mag_errors.iter())
-            .map(|((t, m), err)| {
-                vec![(*t, m - err), (*t, m + err)]
-            })
-            .collect();
-        
-        for error_line in error_lines {
-            chart.draw_series(std::iter::once(PathElement::new(error_line, color.stroke_width(1))))?;
+        // Error bars for detections only
+        for i in 0..b.times_obs.len() {
+            if b.is_upper[i] { continue; }
+            if !b.mags_obs[i].is_finite() { continue; }
+            let t = b.times_obs[i];
+            let m = b.mags_obs[i];
+            let err = b.mag_errors[i];
+            chart.draw_series(std::iter::once(PathElement::new(
+                vec![(t, m - err), (t, m + err)],
+                color.stroke_width(1),
+            )))?;
         }
-        
-        // observations (drawn on top of error bars)
-        chart.draw_series(b.times_obs.iter().zip(b.mags_obs.iter()).map(|(t, m)| {
-            Circle::new((*t, *m), 3, color.filled())
-        }))?;
+
+        // Detection points (filled circles)
+        chart.draw_series(
+            b.times_obs.iter().zip(b.mags_obs.iter()).zip(b.is_upper.iter())
+                .filter(|&((_, m), &is_up)| !is_up && m.is_finite())
+                .map(|((t, m), _)| Circle::new((*t, *m), 3, color.filled()))
+        )?;
+
+        // Upper limit points (downward arrows: line + triangle at limiting mag)
+        for i in 0..b.times_obs.len() {
+            if !b.is_upper[i] { continue; }
+            let lim_mag = b.upper_limit_mags[i];
+            if !lim_mag.is_finite() { continue; }
+            let t = b.times_obs[i];
+            // Draw a small downward arrow (fainter direction in mag space = upward on inverted axis)
+            let arrow_len = (mag_max - mag_min) * 0.03;
+            chart.draw_series(std::iter::once(PathElement::new(
+                vec![(t, lim_mag), (t, lim_mag + arrow_len)],
+                color.mix(0.5).stroke_width(1),
+            )))?;
+            chart.draw_series(std::iter::once(
+                TriangleMarker::new((t, lim_mag), 4, color.mix(0.5))
+            ))?;
+        }
     }
 
     chart.configure_series_labels()
@@ -956,26 +1091,43 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut targets: Vec<String> = Vec::new();
-    if args.len() >= 2 {
-        for arg in &args[1..] {
-            let p = Path::new(arg);
-            if p.is_dir() {
-                // If argument is a directory, add all CSVs in it
-                if let Ok(entries) = fs::read_dir(p) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.extension().and_then(|s| s.to_str()) == Some("csv") {
-                            if let Some(s) = path.to_str() {
-                                targets.push(s.to_string());
-                            }
+    let mut snr_threshold: f64 = 3.0;
+
+    // Parse arguments: --snr-threshold <value> and file/directory paths
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--snr-threshold" {
+            if i + 1 < args.len() {
+                snr_threshold = args[i + 1].parse().unwrap_or_else(|_| {
+                    eprintln!("Invalid --snr-threshold value: {}", args[i + 1]);
+                    std::process::exit(1);
+                });
+                i += 2;
+                continue;
+            } else {
+                eprintln!("--snr-threshold requires a value");
+                std::process::exit(1);
+            }
+        }
+        let p = Path::new(&args[i]);
+        if p.is_dir() {
+            if let Ok(entries) = fs::read_dir(p) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|s| s.to_str()) == Some("csv") {
+                        if let Some(s) = path.to_str() {
+                            targets.push(s.to_string());
                         }
                     }
                 }
-            } else {
-                targets.push(arg.clone());
             }
+        } else {
+            targets.push(args[i].clone());
         }
-    } else {
+        i += 1;
+    }
+
+    if targets.is_empty() {
         let dir = Path::new("lightcurves_csv");
         if !dir.exists() {
             eprintln!("lightcurves_csv not found");
@@ -1000,11 +1152,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_dir = Path::new("parametric_plots");
     fs::create_dir_all(output_dir)?;
 
+    println!("SNR threshold for upper limits: {:.1}", snr_threshold);
+
     let wall_start = Instant::now();
 
     // Process files in parallel using rayon
     let results: Vec<_> = targets.par_iter()
-        .map(|t| (t.clone(), process_file(t, output_dir)))
+        .map(|t| (t.clone(), process_file(t, output_dir, snr_threshold)))
         .collect();
 
     let wall_elapsed = wall_start.elapsed().as_secs_f64();
