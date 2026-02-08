@@ -236,7 +236,7 @@ fn compute_predictive_features(
     }
 }
 
-fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<TimescaleParams>), Box<dyn std::error::Error>> {
+fn process_file(input_path: &str, output_dir: &Path, do_plot: bool) -> Result<(f64, Vec<TimescaleParams>), Box<dyn std::error::Error>> {
     let object_name = input_path.split('/').last().unwrap_or("unknown").trim_end_matches(".csv");
     let bands = read_ztf_lightcurve(input_path, true)?;;
     if bands.is_empty() { eprintln!("No valid data found in {}", input_path); return Ok((0.0, Vec::new())); }
@@ -438,6 +438,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
         }
     }
 
+    if do_plot {
         // Create plots (reuse color map)
         let band_colors: HashMap<&str, RGBColor> = [("g", BLUE), ("r", RED), ("i", GREEN), ("ZTF_g", BLUE), ("ZTF_r", RED), ("ZTF_i", GREEN)].iter().cloned().collect();
         let output_path = output_dir.join(format!("{}_gp_temp_sklears.png", object_name));
@@ -685,96 +686,115 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
         root.present()?;
         println!("✓ Generated {} (1600×800)", output_path.display());
         println!("  Temperature range: {:.0} - {:.0} K", temp_min, temp_max);
+    } // end if do_plot
 
 
-    // Save a compact CSV similar to original (reuse original writer if present)
-    let csv_path = "gp_timescale_parameters_sklears.csv";
-    if !timescale_params.is_empty() {
-        let mut csv_content = String::from("object,band,rise_time_days,decay_time_days,t0_days,peak_mag,chi2,baseline_chi2,n_obs,fwhm_days,rise_rate_mag_per_day,decay_rate_mag_per_day,gp_dfdt_now,gp_dfdt_next,gp_d2fdt2_now,gp_predicted_mag_1d,gp_predicted_mag_2d,gp_time_to_peak,gp_extrap_slope,gp_T_peak,gp_T_now,gp_dTdt_peak,gp_dTdt_now,gp_sigma_f,gp_peak_to_peak,gp_snr_max,gp_dfdt_max,gp_dfdt_min,gp_frac_of_peak,gp_post_var_mean,gp_post_var_max,gp_skewness,gp_kurtosis,gp_n_inflections,gp_amp,gp_lengthscale,gp_alpha\n");
-        for param in &timescale_params {
-            let mut row: Vec<String> = Vec::new();
-            row.push(param.object.clone()); row.push(param.band.clone()); row.push(format!("{:.3}", param.rise_time)); row.push(format!("{:.3}", param.decay_time)); row.push(format!("{:.3}", param.t0)); row.push(format!("{:.3}", param.peak_mag)); row.push(format!("{:.3}", param.chi2)); row.push(format!("{:.1}", param.baseline_chi2)); row.push(format!("{}", param.n_obs));
-            row.push(if param.fwhm.is_nan() { String::from("NaN") } else { format!("{:.3}", param.fwhm) });
-            row.push(if param.rise_rate.is_nan() { String::from("NaN") } else { format!("{:.6}", param.rise_rate) });
-            row.push(if param.decay_rate.is_nan() { String::from("NaN") } else { format!("{:.6}", param.decay_rate) });
-            row.push(if param.gp_dfdt_now.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_dfdt_now)});
-            row.push(if param.gp_dfdt_next.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_dfdt_next)});
-            row.push(if param.gp_d2fdt2_now.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_d2fdt2_now)});
-            row.push(if param.gp_predicted_mag_1d.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_predicted_mag_1d)});
-            row.push(if param.gp_predicted_mag_2d.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_predicted_mag_2d)});
-            row.push(if param.gp_time_to_peak.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_time_to_peak)});
-            row.push(if param.gp_extrap_slope.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_extrap_slope)});
-            row.push(if param.gp_T_peak.is_nan() { String::from("NaN") } else { format!("{:.1}", param.gp_T_peak)});
-            row.push(if param.gp_T_now.is_nan() { String::from("NaN") } else { format!("{:.1}", param.gp_T_now)});
-            row.push(if param.gp_dTdt_peak.is_nan() { String::from("NaN") } else { format!("{:.3}", param.gp_dTdt_peak)});
-            row.push(if param.gp_dTdt_now.is_nan() { String::from("NaN") } else { format!("{:.3}", param.gp_dTdt_now)});
-            row.push(if param.gp_sigma_f.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_sigma_f)});
-            row.push(if param.gp_peak_to_peak.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_peak_to_peak)});
-            row.push(if param.gp_snr_max.is_nan() { String::from("NaN") } else { format!("{:.3}", param.gp_snr_max)});
-            row.push(if param.gp_dfdt_max.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_dfdt_max)});
-            row.push(if param.gp_dfdt_min.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_dfdt_min)});
-            row.push(if param.gp_frac_of_peak.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_frac_of_peak)});
-            row.push(if param.gp_post_var_mean.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_post_var_mean)});
-            row.push(if param.gp_post_var_max.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_post_var_max)});
-            row.push(if param.gp_skewness.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_skewness)});
-            row.push(if param.gp_kurtosis.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_kurtosis)});
-            row.push(if param.gp_n_inflections.is_nan() { String::from("NaN") } else { format!("{:.0}", param.gp_n_inflections)});
-            row.push(if param.gp_amp.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_amp)});
-            row.push(if param.gp_lengthscale.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_lengthscale)});
-            row.push(if param.gp_alpha.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_alpha)});
-            csv_content.push_str(&row.join(",")); csv_content.push_str("\n");
-        }
-          use std::fs::OpenOptions;
-          use std::io::Write;
-          // append rows if file exists, otherwise create with header
-          if std::path::Path::new(csv_path).exists() {
-              let mut f = OpenOptions::new().append(true).open(csv_path)?;
-              // skip header line from csv_content and append remainder
-              if let Some(pos) = csv_content.find('\n') {
-                  let rest = &csv_content[pos+1..];
-                  f.write_all(rest.as_bytes())?;
-              }
-          } else {
-              let mut f = OpenOptions::new().create(true).write(true).open(csv_path)?;
-              f.write_all(csv_content.as_bytes())?;
-          }
-        println!("✓ Timescale parameters saved to: {}", csv_path);
-    }
-
-    println!("\n✓ Completed {} light curves", bands.len());
-    println!("  Plots saved to: {}", output_dir.display());
-    println!("  Total GP fitting time: {:.2}s", total_fit_time);
+    eprintln!("  Completed {} bands, GP fitting: {:.4}s", bands.len(), total_fit_time);
     Ok((total_fit_time, timescale_params))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     let args: Vec<String> = std::env::args().collect();
+    let do_plot = !args.iter().any(|a| a == "--no-plot");
+
     let mut targets: Vec<String> = Vec::new();
-    if args.len() >= 2 {
-        let arg = &args[1];
-        if Path::new(arg).is_dir() {
-            for entry in fs::read_dir(arg)? {
+    for arg in args.iter().skip(1) {
+        if arg.starts_with("--") { continue; }
+        let p = Path::new(arg);
+        if p.is_dir() {
+            for entry in fs::read_dir(p)? {
                 let entry = entry?;
                 let path = entry.path();
                 if path.extension().and_then(|s| s.to_str()) == Some("csv") {
                     if let Some(s) = path.to_str() { targets.push(s.to_string()); }
                 }
             }
-            targets.sort();
         } else {
             targets.push(arg.clone());
         }
-    } else {
-        let dir = Path::new("lightcurves_csv"); if !dir.exists() { eprintln!("Directory lightcurves_csv not found"); std::process::exit(1); }
-        for entry in fs::read_dir(dir)? { let entry = entry?; let path = entry.path(); if path.extension().and_then(|s| s.to_str()) == Some("csv") { if let Some(s) = path.to_str() { targets.push(s.to_string()); } } }
+    }
+    if targets.is_empty() {
+        let dir = Path::new("lightcurves_csv");
+        if !dir.exists() { eprintln!("Directory lightcurves_csv not found"); std::process::exit(1); }
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("csv") {
+                if let Some(s) = path.to_str() { targets.push(s.to_string()); }
+            }
+        }
         if targets.is_empty() { eprintln!("No CSV files found in lightcurves_csv"); std::process::exit(1); }
-        targets.sort();
+    }
+    targets.sort();
+
+    let output_dir = Path::new("egobox_gp_plots");
+    fs::create_dir_all(output_dir)?;
+
+    let n_targets = targets.len();
+    let progress = AtomicUsize::new(0);
+    let total_start = Instant::now();
+
+    let file_results: Vec<(String, Result<(f64, Vec<TimescaleParams>), String>)> = targets
+        .par_iter()
+        .map(|t| {
+            let result = process_file(t, output_dir, do_plot);
+            let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
+            eprint!("\r[{}/{}] {}", done, n_targets, t);
+            (t.clone(), result.map_err(|e| e.to_string()))
+        })
+        .collect();
+
+    let total_elapsed = total_start.elapsed().as_secs_f64();
+    eprintln!();
+
+    let mut total_fit_time = 0.0;
+    let mut all_params: Vec<TimescaleParams> = Vec::new();
+    let mut n_success = 0usize;
+    for (t, result) in file_results {
+        match result {
+            Ok((fit_time, params)) => {
+                total_fit_time += fit_time;
+                if !params.is_empty() { n_success += 1; }
+                all_params.extend(params);
+            }
+            Err(e) => eprintln!("Error processing {}: {}", t, e),
+        }
     }
 
-    let output_dir = Path::new("egobox_gp_plots"); fs::create_dir_all(output_dir)?;
-    let mut total_fit_time = 0.0; let mut all_params: Vec<TimescaleParams> = Vec::new();
-    for (idx, t) in targets.iter().enumerate() { println!("\n[{}/{}] Processing {}", idx + 1, targets.len(), t); match process_file(t, output_dir) { Ok((fit_time, params)) => { total_fit_time += fit_time; all_params.extend(params); }, Err(e) => eprintln!("Error processing {}: {}", t, e), } }
+    // Write global CSV
+    let csv_path = "gp_timescale_parameters_sklears.csv";
+    if !all_params.is_empty() {
+        let mut csv_content = String::from("object,band,rise_time_days,decay_time_days,t0_days,peak_mag,chi2,baseline_chi2,n_obs,fwhm_days,rise_rate_mag_per_day,decay_rate_mag_per_day,gp_dfdt_now,gp_dfdt_next,gp_d2fdt2_now,gp_predicted_mag_1d,gp_predicted_mag_2d,gp_time_to_peak,gp_extrap_slope,gp_T_peak,gp_T_now,gp_dTdt_peak,gp_dTdt_now,gp_sigma_f,gp_peak_to_peak,gp_snr_max,gp_dfdt_max,gp_dfdt_min,gp_frac_of_peak,gp_post_var_mean,gp_post_var_max,gp_skewness,gp_kurtosis,gp_n_inflections,gp_amp,gp_lengthscale,gp_alpha\n");
+        for p in &all_params {
+            fn fmt(v: f64, prec: usize) -> String { if v.is_nan() { "NaN".to_string() } else { format!("{:.prec$}", v, prec = prec) } }
+            csv_content.push_str(&format!(
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                p.object, p.band, fmt(p.rise_time,3), fmt(p.decay_time,3), fmt(p.t0,3), fmt(p.peak_mag,3),
+                fmt(p.chi2,3), fmt(p.baseline_chi2,1), p.n_obs, fmt(p.fwhm,3), fmt(p.rise_rate,6), fmt(p.decay_rate,6),
+                fmt(p.gp_dfdt_now,6), fmt(p.gp_dfdt_next,6), fmt(p.gp_d2fdt2_now,6),
+                fmt(p.gp_predicted_mag_1d,6), fmt(p.gp_predicted_mag_2d,6), fmt(p.gp_time_to_peak,6), fmt(p.gp_extrap_slope,6),
+                fmt(p.gp_T_peak,1), fmt(p.gp_T_now,1), fmt(p.gp_dTdt_peak,3), fmt(p.gp_dTdt_now,3),
+                fmt(p.gp_sigma_f,6), fmt(p.gp_peak_to_peak,6), fmt(p.gp_snr_max,3),
+                fmt(p.gp_dfdt_max,6), fmt(p.gp_dfdt_min,6), fmt(p.gp_frac_of_peak,6),
+                fmt(p.gp_post_var_mean,6), fmt(p.gp_post_var_max,6), fmt(p.gp_skewness,6), fmt(p.gp_kurtosis,6),
+                fmt(p.gp_n_inflections,0), fmt(p.gp_amp,6), fmt(p.gp_lengthscale,6), fmt(p.gp_alpha,6),
+            ));
+        }
+        fs::write(csv_path, csv_content)?;
+    }
 
-    println!("\nDone. Total GP time: {:.2}s", total_fit_time);
+    println!("\n=== Throughput Analysis ===");
+    println!("  Objects processed: {}/{}", n_success, n_targets);
+    println!("  Bands fitted:     {}", all_params.len());
+    println!("  Total wall time:   {:.2}s", total_elapsed);
+    println!("  GP fit time (sum): {:.2}s", total_fit_time);
+    if n_success > 0 {
+        println!("  Objects/sec (wall): {:.1}", n_success as f64 / total_elapsed);
+        println!("  Objects/sec (fit):  {:.1}", n_success as f64 / total_fit_time);
+    }
+    println!("  CSV: {}", csv_path);
     Ok(())
 }
