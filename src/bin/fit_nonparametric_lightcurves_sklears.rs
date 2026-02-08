@@ -741,7 +741,21 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut targets: Vec<String> = Vec::new();
-    if args.len() >= 2 { targets.push(args[1].clone()); } else {
+    if args.len() >= 2 {
+        let arg = &args[1];
+        if Path::new(arg).is_dir() {
+            for entry in fs::read_dir(arg)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("csv") {
+                    if let Some(s) = path.to_str() { targets.push(s.to_string()); }
+                }
+            }
+            targets.sort();
+        } else {
+            targets.push(arg.clone());
+        }
+    } else {
         let dir = Path::new("lightcurves_csv"); if !dir.exists() { eprintln!("Directory lightcurves_csv not found"); std::process::exit(1); }
         for entry in fs::read_dir(dir)? { let entry = entry?; let path = entry.path(); if path.extension().and_then(|s| s.to_str()) == Some("csv") { if let Some(s) = path.to_str() { targets.push(s.to_string()); } } }
         if targets.is_empty() { eprintln!("No CSV files found in lightcurves_csv"); std::process::exit(1); }

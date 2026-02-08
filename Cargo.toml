@@ -64,3 +64,7 @@ path = "src/bin/train_ml_models.rs"
 [[bin]]
 name = "fit_svi_lightcurves"
 path = "src/bin/fit_svi_lightcurves.rs"
+
+[[bin]]
+name = "fit_nonparametric_lightcurves_sklears"
+path = "src/bin/fit_nonparametric_lightcurves_sklears.rs"

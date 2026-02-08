@@ -69,17 +69,25 @@ impl ManualAdam {
 enum SviModel {
     Bazin,
     Villar,
-    PowerLaw,
     MetzgerKN,
+    Tde,
+    Arnett,
+    Magnetar,
+    ShockCooling,
+    Afterglow,
 }
 
 impl SviModel {
     fn n_params(self) -> usize {
         match self {
-            SviModel::Bazin => 6,      // log_a, b, t0, log_tau_rise, log_tau_fall, log_sigma_extra
-            SviModel::Villar => 7,     // log_a, beta, log_gamma, t0, log_tau_rise, log_tau_fall, log_sigma_extra
-            SviModel::PowerLaw => 4,   // log_a, alpha, t0, log_sigma_extra
-            SviModel::MetzgerKN => 5,  // log10_mej, log10_vej, log10_kappa_r, t0, log_sigma_extra
+            SviModel::Bazin => 6,         // log_a, b, t0, log_tau_rise, log_tau_fall, log_sigma_extra
+            SviModel::Villar => 7,        // log_a, beta, log_gamma, t0, log_tau_rise, log_tau_fall, log_sigma_extra
+            SviModel::MetzgerKN => 5,     // log10_mej, log10_vej, log10_kappa_r, t0, log_sigma_extra
+            SviModel::Tde => 7,           // log_a, b, t0, log_tau_rise, log_tau_fall, alpha, log_sigma_extra
+            SviModel::Arnett => 5,        // log_a, t0, log_tau_m, logit_f, log_sigma_extra
+            SviModel::Magnetar => 5,      // log_a, t0, log_tau_sd, log_tau_diff, log_sigma_extra
+            SviModel::ShockCooling => 5,  // log_a, t0, n, log_tau_tr, log_sigma_extra
+            SviModel::Afterglow => 6,    // log_a, t0, log_t_b, alpha1, alpha2, log_sigma_extra
         }
     }
 
@@ -88,8 +96,12 @@ impl SviModel {
         match self {
             SviModel::Bazin => 5,
             SviModel::Villar => 6,
-            SviModel::PowerLaw => 3,
             SviModel::MetzgerKN => 4,
+            SviModel::Tde => 6,
+            SviModel::Arnett => 4,
+            SviModel::Magnetar => 4,
+            SviModel::ShockCooling => 4,
+            SviModel::Afterglow => 5,
         }
     }
 
@@ -97,8 +109,12 @@ impl SviModel {
         match self {
             SviModel::Bazin => vec!["log_a", "b", "t0", "log_tau_rise", "log_tau_fall", "log_sigma_extra"],
             SviModel::Villar => vec!["log_a", "beta", "log_gamma", "t0", "log_tau_rise", "log_tau_fall", "log_sigma_extra"],
-            SviModel::PowerLaw => vec!["log_a", "alpha", "t0", "log_sigma_extra"],
             SviModel::MetzgerKN => vec!["log10_mej", "log10_vej", "log10_kappa_r", "t0", "log_sigma_extra"],
+            SviModel::Tde => vec!["log_a", "b", "t0", "log_tau_rise", "log_tau_fall", "alpha", "log_sigma_extra"],
+            SviModel::Arnett => vec!["log_a", "t0", "log_tau_m", "logit_f", "log_sigma_extra"],
+            SviModel::Magnetar => vec!["log_a", "t0", "log_tau_sd", "log_tau_diff", "log_sigma_extra"],
+            SviModel::ShockCooling => vec!["log_a", "t0", "n", "log_tau_tr", "log_sigma_extra"],
+            SviModel::Afterglow => vec!["log_a", "t0", "log_t_b", "alpha1", "alpha2", "log_sigma_extra"],
         }
     }
 
@@ -106,8 +122,12 @@ impl SviModel {
         match self {
             SviModel::Bazin => "Bazin",
             SviModel::Villar => "Villar",
-            SviModel::PowerLaw => "PowerLaw",
             SviModel::MetzgerKN => "MetzgerKN",
+            SviModel::Tde => "Tde",
+            SviModel::Arnett => "Arnett",
+            SviModel::Magnetar => "Magnetar",
+            SviModel::ShockCooling => "ShockCooling",
+            SviModel::Afterglow => "Afterglow",
         }
     }
 
@@ -238,47 +258,342 @@ fn villar_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     vec![d_log_a, d_beta, d_log_gamma, d_t0, d_log_tau_rise, d_log_tau_fall, d_log_sigma_extra]
 }
 
-fn powerlaw_flux_eval(params: &[f64], t: f64) -> f64 {
+/// TDE model: sigmoid rise + power-law decay + baseline.
+/// params: [log_a, b, t0, log_tau_rise, log_tau_fall, alpha, log_sigma_extra]
+/// flux = a * sig(phase/tau_rise) * (1 + softplus(phase)/tau_fall)^(-alpha) + b
+fn tde_flux_eval(params: &[f64], t: f64) -> f64 {
     let a = params[0].exp();
-    let alpha = params[1];
+    let b = params[1];
     let t0 = params[2];
+    let tau_rise = params[3].exp();
+    let tau_fall = params[4].exp();
+    let alpha = params[5];
     let phase = t - t0;
-    let sig5 = 1.0 / (1.0 + (-phase * 5.0).exp());
-    let phase_soft = sig5 * phase + 0.01;
-    a * (-alpha * phase_soft.ln()).exp()
+
+    // Sigmoid rise
+    let sig = 1.0 / (1.0 + (-phase / tau_rise).exp());
+    // Softplus for smooth max(0, phase)
+    let phase_soft = (1.0 + phase.exp()).ln() + 1e-6;
+    // Power-law decay
+    let w = 1.0 + phase_soft / tau_fall;
+    let decay = w.powf(-alpha);
+
+    a * sig * decay + b
 }
 
-/// Analytical d(flux)/d(theta_j) for PowerLaw.
-/// params: [log_a, alpha, t0, log_sigma_extra]
-fn powerlaw_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
+/// Analytical d(flux)/d(theta_j) for TDE model.
+/// params: [log_a, b, t0, log_tau_rise, log_tau_fall, alpha, log_sigma_extra]
+fn tde_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     let a = params[0].exp();
-    let alpha = params[1];
     let t0 = params[2];
+    let tau_rise = params[3].exp();
+    let tau_fall = params[4].exp();
+    let alpha = params[5];
     let phase = t - t0;
-    let sig5 = 1.0 / (1.0 + (-phase * 5.0).exp());
-    let phase_soft = sig5 * phase + 0.01;
-    let flux = a * (-alpha * phase_soft.ln()).exp();
 
-    // d(flux)/d(log_a) = flux
-    let d_log_a = flux;
-    // d(flux)/d(alpha) = -flux * ln(phase_soft)
-    let d_alpha = -flux * phase_soft.ln();
+    let sig = 1.0 / (1.0 + (-phase / tau_rise).exp());
+    let phase_soft = (1.0 + phase.exp()).ln() + 1e-6;
+    let sig_phase = phase.exp() / (1.0 + phase.exp()); // d(softplus)/d(phase)
+    let w = 1.0 + phase_soft / tau_fall;
+    let decay = w.powf(-alpha);
+    let base = a * sig * decay; // flux - b
+
+    // d(flux)/d(log_a) = a * sig * decay  (chain: d(a)/d(log_a) = a)
+    let d_log_a = base;
+
+    // d(flux)/d(b) = 1
+    let d_b = 1.0;
+
     // d(flux)/d(t0): d(phase)/d(t0) = -1
-    //   d(phase_soft)/d(phase) = 5*sig5*(1-sig5)*phase + sig5
-    //   d(flux)/d(phase_soft) = -flux * alpha / phase_soft
-    let dps_dphase = 5.0 * sig5 * (1.0 - sig5) * phase + sig5;
-    let d_t0 = flux * alpha / phase_soft * dps_dphase; // negation from d(phase)/d(t0)=-1 cancels with chain
+    //   d(sig)/d(t0) = -sig*(1-sig)/tau_rise
+    //   d(decay)/d(t0) = alpha * w^(-alpha-1) * sig_phase / tau_fall
+    let dsig_dt0 = -sig * (1.0 - sig) / tau_rise;
+    let ddecay_dt0 = alpha * w.powf(-alpha - 1.0) * sig_phase / tau_fall;
+    let d_t0 = a * (dsig_dt0 * decay + sig * ddecay_dt0);
+
+    // d(flux)/d(log_tau_rise) = a * decay * d(sig)/d(log_tau_rise)
+    //   d(sig)/d(log_tau_rise) = sig*(1-sig) * (-phase/tau_rise) * tau_rise = -sig*(1-sig)*phase/tau_rise
+    //   but d(tau_rise)/d(log_tau_rise) = tau_rise, so total:
+    //   = -sig*(1-sig) * phase/tau_rise  (the tau_rise in numerator from chain cancels with denominator)
+    let d_log_tau_rise = a * decay * (-sig * (1.0 - sig) * phase / tau_rise);
+
+    // d(flux)/d(log_tau_fall) = a * sig * d(decay)/d(log_tau_fall)
+    //   d(w)/d(tau_fall) = -phase_soft/tau_fall^2, d(tau_fall)/d(log_tau_fall) = tau_fall
+    //   d(w)/d(log_tau_fall) = -phase_soft/tau_fall
+    //   d(decay)/d(log_tau_fall) = -alpha * w^(-alpha-1) * (-phase_soft/tau_fall)
+    //                            = alpha * w^(-alpha-1) * phase_soft / tau_fall
+    let d_log_tau_fall = a * sig * alpha * w.powf(-alpha - 1.0) * phase_soft / tau_fall;
+
+    // d(flux)/d(alpha) = a * sig * d(decay)/d(alpha)
+    //   decay = w^(-alpha) = exp(-alpha * ln(w))
+    //   d(decay)/d(alpha) = -ln(w) * decay
+    let d_alpha = a * sig * (-w.ln()) * decay;
+
     // d(flux)/d(log_sigma_extra) = 0
     let d_log_sigma_extra = 0.0;
 
-    vec![d_log_a, d_alpha, d_t0, d_log_sigma_extra]
+    vec![d_log_a, d_b, d_t0, d_log_tau_rise, d_log_tau_fall, d_alpha, d_log_sigma_extra]
+}
+
+/// Arnett model: Ni-56/Co-56 radioactive decay with diffusion trapping.
+/// params: [log_a, t0, log_tau_m, logit_f, log_sigma_extra]
+/// flux = a * heat(t) * trap(t)
+///   heat = f*exp(-t/τ_Ni) + (1-f)*exp(-t/τ_Co)  (radioactive heating)
+///   trap = 1 - exp(-(t/τ_m)²)                    (diffusion trapping)
+fn arnett_flux_eval(params: &[f64], t: f64) -> f64 {
+    let a = params[0].exp();
+    let t0 = params[1];
+    let tau_m = params[2].exp();
+    let logit_f = params[3];
+
+    let phase = t - t0;
+    let phase_soft = (1.0 + phase.exp()).ln() + 1e-6;
+
+    let f = 1.0 / (1.0 + (-logit_f).exp());
+
+    const TAU_NI: f64 = 8.8;
+    const TAU_CO: f64 = 111.3;
+
+    let e_ni = (-phase_soft / TAU_NI).exp();
+    let e_co = (-phase_soft / TAU_CO).exp();
+    let heat = f * e_ni + (1.0 - f) * e_co;
+
+    let x = phase_soft / tau_m;
+    let trap = 1.0 - (-x * x).exp();
+
+    a * heat * trap
+}
+
+fn arnett_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
+    let a = params[0].exp();
+    let t0 = params[1];
+    let tau_m = params[2].exp();
+    let logit_f = params[3];
+
+    let phase = t - t0;
+    let phase_soft = (1.0 + phase.exp()).ln() + 1e-6;
+    let sig_p = phase.exp() / (1.0 + phase.exp());
+
+    let f = 1.0 / (1.0 + (-logit_f).exp());
+
+    const TAU_NI: f64 = 8.8;
+    const TAU_CO: f64 = 111.3;
+
+    let e_ni = (-phase_soft / TAU_NI).exp();
+    let e_co = (-phase_soft / TAU_CO).exp();
+    let heat = f * e_ni + (1.0 - f) * e_co;
+
+    let x = phase_soft / tau_m;
+    let exp_x2 = (-x * x).exp();
+    let trap = 1.0 - exp_x2;
+
+    let flux = a * heat * trap;
+
+    let d_log_a = flux;
+
+    // d/d(t0): chain through softplus
+    let dheat_dps = -f * e_ni / TAU_NI - (1.0 - f) * e_co / TAU_CO;
+    let dtrap_dps = 2.0 * phase_soft * exp_x2 / (tau_m * tau_m);
+    let d_t0 = a * (-sig_p) * (dheat_dps * trap + heat * dtrap_dps);
+
+    // d/d(log_tau_m): increasing tau_m decreases trap
+    let d_log_tau_m = -2.0 * a * heat * exp_x2 * x * x;
+
+    // d/d(logit_f): sigmoid derivative
+    let d_logit_f = a * trap * (e_ni - e_co) * f * (1.0 - f);
+
+    vec![d_log_a, d_t0, d_log_tau_m, d_logit_f, 0.0]
+}
+
+/// Magnetar model: spindown luminosity with diffusion trapping.
+/// params: [log_a, t0, log_tau_sd, log_tau_diff, log_sigma_extra]
+/// flux = a * (1 + t/τ_sd)^(-2) * (1 - exp(-(t/τ_diff)²))
+fn magnetar_flux_eval(params: &[f64], t: f64) -> f64 {
+    let a = params[0].exp();
+    let t0 = params[1];
+    let tau_sd = params[2].exp();
+    let tau_diff = params[3].exp();
+
+    let phase = t - t0;
+    let phase_soft = (1.0 + phase.exp()).ln() + 1e-6;
+
+    let w = 1.0 + phase_soft / tau_sd;
+    let spindown = w.powi(-2);
+
+    let x = phase_soft / tau_diff;
+    let trap = 1.0 - (-x * x).exp();
+
+    a * spindown * trap
+}
+
+fn magnetar_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
+    let a = params[0].exp();
+    let t0 = params[1];
+    let tau_sd = params[2].exp();
+    let tau_diff = params[3].exp();
+
+    let phase = t - t0;
+    let phase_soft = (1.0 + phase.exp()).ln() + 1e-6;
+    let sig_p = phase.exp() / (1.0 + phase.exp());
+
+    let w = 1.0 + phase_soft / tau_sd;
+    let spindown = w.powi(-2);
+
+    let x = phase_soft / tau_diff;
+    let exp_x2 = (-x * x).exp();
+    let trap = 1.0 - exp_x2;
+
+    let flux = a * spindown * trap;
+
+    let d_log_a = flux;
+
+    // d/d(t0)
+    let dspindown_dps = -2.0 * w.powi(-3) / tau_sd;
+    let dtrap_dps = 2.0 * phase_soft * exp_x2 / (tau_diff * tau_diff);
+    let d_t0 = a * (-sig_p) * (dspindown_dps * trap + spindown * dtrap_dps);
+
+    // d/d(log_tau_sd): increasing tau_sd → spindown decays slower → more flux
+    let d_log_tau_sd = a * trap * 2.0 * phase_soft * w.powi(-3) / tau_sd;
+
+    // d/d(log_tau_diff): increasing tau_diff → less escapes → less flux
+    let d_log_tau_diff = -2.0 * a * spindown * exp_x2 * x * x;
+
+    vec![d_log_a, d_t0, d_log_tau_sd, d_log_tau_diff, 0.0]
+}
+
+/// Shock cooling model: power-law cooling with Gaussian transparency cutoff.
+/// params: [log_a, t0, n, log_tau_tr, log_sigma_extra]
+/// flux = a * sigmoid(5*phase) * phase_soft^(-n) * exp(-(phase_soft/τ_tr)²)
+fn shockcooling_flux_eval(params: &[f64], t: f64) -> f64 {
+    let a = params[0].exp();
+    let t0 = params[1];
+    let n = params[2];
+    let tau_tr = params[3].exp();
+
+    let phase = t - t0;
+    let sig5 = 1.0 / (1.0 + (-phase * 5.0).exp());
+    let phase_soft = (1.0 + phase.exp()).ln() + 1e-6;
+
+    let cooling = phase_soft.powf(-n);
+    let ratio = phase_soft / tau_tr;
+    let cutoff = (-ratio * ratio).exp();
+
+    a * sig5 * cooling * cutoff
+}
+
+fn shockcooling_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
+    let a = params[0].exp();
+    let t0 = params[1];
+    let n = params[2];
+    let tau_tr = params[3].exp();
+
+    let phase = t - t0;
+    let sig5 = 1.0 / (1.0 + (-phase * 5.0).exp());
+    let phase_soft = (1.0 + phase.exp()).ln() + 1e-6;
+    let sig_p = phase.exp() / (1.0 + phase.exp());
+
+    let cooling = phase_soft.powf(-n);
+    let ratio = phase_soft / tau_tr;
+    let cutoff = (-ratio * ratio).exp();
+    let base = cooling * cutoff; // without sig5
+    let flux = a * sig5 * base;
+
+    let d_log_a = flux;
+
+    // d/d(t0): d(phase)/d(t0) = -1
+    let d_t0 = a * base * (
+        -5.0 * sig5 * (1.0 - sig5)
+        + sig5 * sig_p * (n / phase_soft + 2.0 * phase_soft / (tau_tr * tau_tr))
+    );
+
+    // d/d(n)
+    let d_n = -flux * phase_soft.ln();
+
+    // d/d(log_tau_tr)
+    let d_log_tau_tr = flux * 2.0 * ratio * ratio;
+
+    vec![d_log_a, d_t0, d_n, d_log_tau_tr, 0.0]
+}
+
+/// Afterglow model: smoothly broken power law (Beuermann+1999).
+/// params: [log_a, t0, log_t_b, alpha1, alpha2, log_sigma_extra]
+/// flux = a * [(phase/t_b)^(2*alpha1) + (phase/t_b)^(2*alpha2)]^(-1/2)
+/// alpha1 < alpha2: pre-break slope vs post-break (steeper) slope.
+/// For t << t_b: flux ~ a * (t/t_b)^(-alpha1)
+/// For t >> t_b: flux ~ a * (t/t_b)^(-alpha2)
+fn afterglow_flux_eval(params: &[f64], t: f64) -> f64 {
+    let a = params[0].exp();
+    let t0 = params[1];
+    let t_b = params[2].exp();
+    let alpha1 = params[3];
+    let alpha2 = params[4];
+
+    let phase = t - t0;
+    let phase_soft = (1.0 + phase.exp()).ln() + 1e-6;
+
+    let r = phase_soft / t_b;
+    let ln_r = r.ln();
+    let u1 = (2.0 * alpha1 * ln_r).exp();
+    let u2 = (2.0 * alpha2 * ln_r).exp();
+    let u = u1 + u2;
+
+    a * u.powf(-0.5)
+}
+
+fn afterglow_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
+    let a = params[0].exp();
+    let t0 = params[1];
+    let t_b = params[2].exp();
+    let alpha1 = params[3];
+    let alpha2 = params[4];
+
+    let phase = t - t0;
+    let phase_soft = (1.0 + phase.exp()).ln() + 1e-6;
+    let sig_p = phase.exp() / (1.0 + phase.exp()); // d(softplus)/d(phase)
+
+    let r = phase_soft / t_b;
+    let ln_r = r.ln();
+    let u1 = (2.0 * alpha1 * ln_r).exp();
+    let u2 = (2.0 * alpha2 * ln_r).exp();
+    let u = u1 + u2;
+    let flux = a * u.powf(-0.5);
+
+    // d(flux)/d(log_a) = flux
+    let d_log_a = flux;
+
+    // d(flux)/d(t0): chain through softplus, d(phase)/d(t0) = -1
+    // du/d(phase) = (2*alpha1/phase_soft)*u1 + (2*alpha2/phase_soft)*u2
+    let du_dps = (2.0 * alpha1 * u1 + 2.0 * alpha2 * u2) / phase_soft;
+    // d(flux)/d(phase_soft) = a * (-0.5) * u^(-1.5) * du/d(phase_soft)
+    let dflux_dps = a * (-0.5) * u.powf(-1.5) * du_dps;
+    let d_t0 = dflux_dps * (-sig_p); // d(phase)/d(t0) = -1, d(phase_soft)/d(phase) = sig_p
+
+    // d(flux)/d(log_t_b): d(r)/d(log_t_b) = -r, d(ln_r)/d(log_t_b) = -1
+    // du/d(log_t_b) = -2*alpha1*u1 + -2*alpha2*u2
+    let du_dlog_tb = -(2.0 * alpha1 * u1 + 2.0 * alpha2 * u2);
+    let d_log_t_b = a * (-0.5) * u.powf(-1.5) * du_dlog_tb;
+
+    // d(flux)/d(alpha1) = a * (-0.5) * u^(-1.5) * du/d(alpha1)
+    // du/d(alpha1) = 2 * ln(r) * u1
+    let d_alpha1 = a * (-0.5) * u.powf(-1.5) * 2.0 * ln_r * u1;
+
+    // d(flux)/d(alpha2) = a * (-0.5) * u^(-1.5) * du/d(alpha2)
+    // du/d(alpha2) = 2 * ln(r) * u2
+    let d_alpha2 = a * (-0.5) * u.powf(-1.5) * 2.0 * ln_r * u2;
+
+    // d(flux)/d(log_sigma_extra) = 0
+    vec![d_log_a, d_t0, d_log_t_b, d_alpha1, d_alpha2, 0.0]
 }
 
 fn eval_model(model: SviModel, params: &[f64], t: f64) -> f64 {
     match model {
         SviModel::Bazin => bazin_flux_eval(params, t),
         SviModel::Villar => villar_flux_eval(params, t),
-        SviModel::PowerLaw => powerlaw_flux_eval(params, t),
+        SviModel::Tde => tde_flux_eval(params, t),
+        SviModel::Arnett => arnett_flux_eval(params, t),
+        SviModel::Magnetar => magnetar_flux_eval(params, t),
+        SviModel::ShockCooling => shockcooling_flux_eval(params, t),
+        SviModel::Afterglow => afterglow_flux_eval(params, t),
         SviModel::MetzgerKN => panic!("MetzgerKN requires batch evaluation"),
     }
 }
@@ -288,7 +603,11 @@ fn eval_model_grad(model: SviModel, params: &[f64], t: f64) -> Vec<f64> {
     match model {
         SviModel::Bazin => bazin_flux_grad(params, t),
         SviModel::Villar => villar_flux_grad(params, t),
-        SviModel::PowerLaw => powerlaw_flux_grad(params, t),
+        SviModel::Tde => tde_flux_grad(params, t),
+        SviModel::Arnett => arnett_flux_grad(params, t),
+        SviModel::Magnetar => magnetar_flux_grad(params, t),
+        SviModel::ShockCooling => shockcooling_flux_grad(params, t),
+        SviModel::Afterglow => afterglow_flux_grad(params, t),
         SviModel::MetzgerKN => panic!("MetzgerKN requires batch evaluation"),
     }
 }
@@ -485,6 +804,7 @@ impl CostFunction for PsoCost {
         let sigma_extra = p[se_idx].exp();
         let sigma_extra_sq = sigma_extra * sigma_extra;
         let preds = eval_model_batch(self.model, p, &self.times);
+        let n = self.times.len().max(1) as f64;
         let mut neg_ll = 0.0;
         for i in 0..self.times.len() {
             let pred = preds[i];
@@ -495,45 +815,49 @@ impl CostFunction for PsoCost {
             let total_var = self.flux_err[i] * self.flux_err[i] + sigma_extra_sq + 1e-10;
             neg_ll += diff * diff / total_var + total_var.ln();
         }
-        Ok(neg_ll / self.times.len().max(1) as f64)
+        Ok(neg_ll / n)
     }
 }
 
-/// Cascading PSO model selection. Try Bazin first (cheapest, most common).
-/// Only try additional models if the best chi2 so far exceeds `cascade_threshold`.
-/// Returns (best_model, best_params_unconstrained, best_chi2).
+/// PSO model selection: try models one at a time in priority order,
+/// stop as soon as one fits well enough (cost < EARLY_STOP_THRESHOLD).
+///
+/// Order (cheapest/broadest first):
+///   Bazin → Arnett → Tde → Afterglow → Villar → Magnetar → ShockCooling → MetzgerKN
+///
+/// Returns (best_model, best_params, best_cost).
 fn pso_model_select(data: &BandFitData) -> (SviModel, Vec<f64>, f64) {
-    // Ordered by cost: cheap phenomenological models first, expensive physical last
-    let cascade: &[(f64, &[SviModel])] = &[
-        // Stage 1: always try Bazin (cheapest)
-        (f64::INFINITY, &[SviModel::Bazin]),
-        // Stage 2: try Villar + PowerLaw if cost > -3.0 (~top 40% worst fits)
-        (-3.0, &[SviModel::Villar, SviModel::PowerLaw]),
-        // Stage 3: try MetzgerKN only if cost > -1.5 (~top 10% worst fits)
-        (-1.5, &[SviModel::MetzgerKN]),
+    const EARLY_STOP: f64 = -3.0;
+
+    let models: &[SviModel] = &[
+        SviModel::Bazin,
+        SviModel::Arnett,
+        SviModel::Tde,
+        SviModel::Afterglow,
+        SviModel::Villar,
+        SviModel::Magnetar,
+        SviModel::ShockCooling,
+        SviModel::MetzgerKN,
     ];
 
     let mut best_model = SviModel::Bazin;
     let mut best_params = vec![];
     let mut best_chi2 = f64::INFINITY;
 
-    for &(threshold, models) in cascade {
-        if best_chi2 < threshold {
-            break; // good enough, skip remaining stages
-        }
-        for &model in models {
-            let (lower, upper) = pso_bounds(model);
-            let problem = PsoCost {
-                times: data.times.clone(),
-                flux: data.flux.clone(),
-                flux_err: data.flux_err.clone(),
-                model,
-            };
-            let solver = ParticleSwarm::new((lower, upper), 40);
-            let res = Executor::new(problem, solver)
-                .configure(|state| state.max_iters(50))
-                .run();
-            if let Ok(res) = res {
+    for &model in models {
+        let (lower, upper) = pso_bounds(model);
+        let problem = PsoCost {
+            times: data.times.clone(),
+            flux: data.flux.clone(),
+            flux_err: data.flux_err.clone(),
+            model,
+        };
+        let solver = ParticleSwarm::new((lower, upper), 40);
+        let res = Executor::new(problem, solver)
+            .configure(|state| state.max_iters(50))
+            .run();
+        match res {
+            Ok(res) => {
                 let chi2 = res.state().get_cost();
                 if chi2 < best_chi2 {
                     best_chi2 = chi2;
@@ -541,6 +865,13 @@ fn pso_model_select(data: &BandFitData) -> (SviModel, Vec<f64>, f64) {
                     best_params = res.state().get_best_param().unwrap().position.clone();
                 }
             }
+            Err(e) => {
+                eprintln!("  PSO error for {}: {}", model.name(), e);
+            }
+        }
+        // Early stop: if current best is good enough, don't try more models
+        if best_chi2 < EARLY_STOP {
+            break;
         }
     }
 
@@ -560,9 +891,6 @@ fn prior_params(model: SviModel) -> Vec<(f64, f64)> {
         SviModel::Villar => {
             vec![(0.0, 2.0), (0.0, 2.0), (0.0, 2.0), (0.0, 2.0), (0.0, 2.0), (0.0, 2.0), (0.0, 2.0)]
         }
-        SviModel::PowerLaw => {
-            vec![(0.0, 2.0), (0.0, 2.0), (0.0, 2.0), (0.0, 2.0)]
-        }
         SviModel::MetzgerKN => {
             // Tight priors from NMMA: center of prior range, width = half-range
             // log10_mej: U[-3, -0.5] → center=-1.75, width=1.25
@@ -571,6 +899,30 @@ fn prior_params(model: SviModel) -> Vec<(f64, f64)> {
             // t0: U[-2, 1] → center=-0.5, width=1.5
             // log_sigma_extra: wide
             vec![(-1.75, 1.25), (-1.25, 0.75), (0.5, 1.5), (-0.5, 1.5), (0.0, 2.0)]
+        }
+        SviModel::Tde => {
+            // log_a, b, t0, log_tau_rise, log_tau_fall, alpha, log_sigma_extra
+            // alpha centered at 5/3 (TDE theoretical), width 1.0
+            vec![(0.0, 2.0), (0.0, 2.0), (0.0, 2.0), (0.0, 2.0), (0.0, 2.0), (1.67, 1.0), (0.0, 2.0)]
+        }
+        SviModel::Arnett => {
+            // log_a, t0, log_tau_m, logit_f, log_sigma_extra
+            // tau_m ~10 days typical for SNe
+            vec![(0.0, 2.0), (0.0, 2.0), (2.3, 1.0), (0.0, 2.0), (0.0, 2.0)]
+        }
+        SviModel::Magnetar => {
+            // log_a, t0, log_tau_sd, log_tau_diff, log_sigma_extra
+            vec![(0.0, 2.0), (0.0, 2.0), (3.0, 1.5), (2.3, 1.0), (0.0, 2.0)]
+        }
+        SviModel::ShockCooling => {
+            // log_a, t0, n, log_tau_tr, log_sigma_extra
+            // n ~ 0.5-1.0 typical for shock cooling
+            vec![(0.0, 2.0), (0.0, 2.0), (0.5, 1.0), (1.0, 2.0), (0.0, 2.0)]
+        }
+        SviModel::Afterglow => {
+            // log_a, t0, log_t_b, alpha1, alpha2, log_sigma_extra
+            // alpha1 ~ 0.8 (pre-break, shallow decay), alpha2 ~ 2.0 (post-break, steep)
+            vec![(0.0, 2.0), (0.0, 2.0), (1.0, 2.0), (0.8, 1.0), (2.0, 1.0), (0.0, 2.0)]
         }
     }
 }
@@ -589,17 +941,41 @@ fn pso_bounds(model: SviModel) -> (Vec<f64>, Vec<f64>) {
             let upper = vec![3.0, 0.1, 5.0, 100.0, 5.0, 7.0, 0.0];
             (lower, upper)
         }
-        SviModel::PowerLaw => {
-            // log_a, alpha, t0, log_sigma_extra
-            let lower = vec![-3.0, 0.1, -100.0, -5.0];
-            let upper = vec![3.0, 5.0, 100.0, 0.0];
-            (lower, upper)
-        }
         SviModel::MetzgerKN => {
             // log10_mej, log10_vej, log10_kappa_r, t0, log_sigma_extra
             // Bounds from NMMA Me2017.prior (physically motivated)
             let lower = vec![-3.0, -2.0, -1.0, -2.0, -5.0];
             let upper = vec![-0.5, -0.5,  2.0,  1.0,  0.0];
+            (lower, upper)
+        }
+        SviModel::Tde => {
+            // log_a, b, t0, log_tau_rise, log_tau_fall, alpha, log_sigma_extra
+            let lower = vec![-3.0, -1.0, -100.0, -2.0, -1.0, 0.5, -5.0];
+            let upper = vec![ 3.0,  1.0,  100.0,  5.0,  6.0, 4.0,  0.0];
+            (lower, upper)
+        }
+        SviModel::Arnett => {
+            // log_a, t0, log_tau_m, logit_f, log_sigma_extra
+            let lower = vec![-3.0, -100.0, 0.5, -3.0, -5.0];
+            let upper = vec![ 3.0,  100.0, 4.5,  3.0,  0.0];
+            (lower, upper)
+        }
+        SviModel::Magnetar => {
+            // log_a, t0, log_tau_sd, log_tau_diff, log_sigma_extra
+            let lower = vec![-3.0, -100.0, 0.0, 0.5, -5.0];
+            let upper = vec![ 3.0,  100.0, 6.0, 4.5,  0.0];
+            (lower, upper)
+        }
+        SviModel::ShockCooling => {
+            // log_a, t0, n, log_tau_tr, log_sigma_extra
+            let lower = vec![-3.0, -100.0, 0.1, -1.0, -5.0];
+            let upper = vec![ 3.0,  100.0, 3.0,  4.0,  0.0];
+            (lower, upper)
+        }
+        SviModel::Afterglow => {
+            // log_a, t0, log_t_b, alpha1, alpha2, log_sigma_extra
+            let lower = vec![-3.0, -100.0, -2.0, -2.0, 0.5, -5.0];
+            let upper = vec![ 3.0,  100.0,  6.0,  3.0, 5.0,  0.0];
             (lower, upper)
         }
     }
@@ -643,14 +1019,6 @@ fn init_variational_means(model: SviModel, data: &BandFitData) -> Vec<f64> {
             let log_sigma_extra = (-3.0_f64).ln().max(-5.0); // small extra noise
             vec![log_a, beta, log_gamma, t0, log_tau_rise, log_tau_fall, log_sigma_extra]
         }
-        SviModel::PowerLaw => {
-            // log_a, alpha, t0, log_sigma_extra
-            let log_a = peak_val.max(0.01).ln();
-            let alpha = 1.5;
-            let t0 = t_peak - 5.0; // explosion ~5 days before peak
-            let log_sigma_extra = (-3.0_f64).ln().max(-5.0);
-            vec![log_a, alpha, t0, log_sigma_extra]
-        }
         SviModel::MetzgerKN => {
             // log10_mej, log10_vej, log10_kappa_r, t0, log_sigma_extra
             let log10_mej = -2.0;  // 0.01 Msun
@@ -659,6 +1027,54 @@ fn init_variational_means(model: SviModel, data: &BandFitData) -> Vec<f64> {
             let t0 = t_peak - 2.0; // merger ~2 days before peak
             let log_sigma_extra = -3.0;
             vec![log10_mej, log10_vej, log10_kappa_r, t0, log_sigma_extra]
+        }
+        SviModel::Tde => {
+            // log_a, b, t0, log_tau_rise, log_tau_fall, alpha, log_sigma_extra
+            let log_a = peak_val.max(0.01).ln();
+            let b = 0.0;
+            let t0 = t_peak - 10.0;        // onset ~10 days before peak for TDEs
+            let log_tau_rise = 2.0_f64.ln(); // ~2 day rise
+            let log_tau_fall = 20.0_f64.ln(); // ~20 day fallback timescale
+            let alpha = 1.67;               // TDE canonical t^(-5/3)
+            let log_sigma_extra = -3.0;
+            vec![log_a, b, t0, log_tau_rise, log_tau_fall, alpha, log_sigma_extra]
+        }
+        SviModel::Arnett => {
+            // log_a, t0, log_tau_m, logit_f, log_sigma_extra
+            let log_a = peak_val.max(0.01).ln();
+            let t0 = t_peak - 15.0;         // explosion ~15 days before peak
+            let log_tau_m = 10.0_f64.ln();   // ~10 day diffusion timescale
+            let logit_f = 0.0;              // f = 0.5 (equal Ni/Co)
+            let log_sigma_extra = -3.0;
+            vec![log_a, t0, log_tau_m, logit_f, log_sigma_extra]
+        }
+        SviModel::Magnetar => {
+            // log_a, t0, log_tau_sd, log_tau_diff, log_sigma_extra
+            let log_a = peak_val.max(0.01).ln();
+            let t0 = t_peak - 10.0;         // explosion ~10 days before peak
+            let log_tau_sd = 20.0_f64.ln();  // ~20 day spindown timescale
+            let log_tau_diff = 10.0_f64.ln(); // ~10 day diffusion timescale
+            let log_sigma_extra = -3.0;
+            vec![log_a, t0, log_tau_sd, log_tau_diff, log_sigma_extra]
+        }
+        SviModel::ShockCooling => {
+            // log_a, t0, n, log_tau_tr, log_sigma_extra
+            let log_a = peak_val.max(0.01).ln();
+            let t0 = t_peak - 2.0;          // shock breakout ~2 days before peak
+            let n = 0.5;                     // canonical power-law index
+            let log_tau_tr = 5.0_f64.ln();   // ~5 day transparency timescale
+            let log_sigma_extra = -3.0;
+            vec![log_a, t0, n, log_tau_tr, log_sigma_extra]
+        }
+        SviModel::Afterglow => {
+            // log_a, t0, log_t_b, alpha1, alpha2, log_sigma_extra
+            let log_a = peak_val.max(0.01).ln();
+            let t0 = t_peak - 5.0;          // GRB trigger ~5 days before optical peak
+            let log_t_b = 10.0_f64.ln();     // jet break ~10 days
+            let alpha1 = 0.8;               // pre-break: shallow decay
+            let alpha2 = 2.2;               // post-break: steep decay (~ -p)
+            let log_sigma_extra = -3.0;
+            vec![log_a, t0, log_t_b, alpha1, alpha2, log_sigma_extra]
         }
     }
 }
@@ -1101,6 +1517,8 @@ struct BandFitOutput {
     pso_time_s: f64,
     svi_time_s: f64,
     n_obs: usize,
+    /// Reduced chi² in magnitude space: sum((mag_obs - mag_pred)² / mag_err²) / N
+    mag_chi2: f64,
 }
 
 /// Fit a single file. Returns per-band results and optionally generates plots.
@@ -1175,14 +1593,39 @@ fn process_file(
     for (band_name, data, mags_obs) in &band_entries {
         let fit_start = Instant::now();
 
-        // Step 1: PSO model selection
+        // Step 1: PSO model selection (cascade)
         let (pso_model, pso_params, pso_chi2) = pso_model_select(data);
         let pso_time = fit_start.elapsed().as_secs_f64();
+
+        // Skip band if PSO failed to find any valid params
+        if pso_params.is_empty() {
+            eprintln!("  [{}] PSO returned no params, skipping band", band_name);
+            continue;
+        }
 
         // Step 2: SVI refinement
         let svi_start = Instant::now();
         let svi_result = svi_fit(pso_model, data, 1000, 4, 0.01, Some(&pso_params));
         let svi_time = svi_start.elapsed().as_secs_f64();
+
+        // Compute reduced chi² in magnitude space using SVI posterior mean
+        let svi_preds = eval_model_batch(pso_model, &svi_result.mu, &data.times);
+        let mut mag_chi2_sum = 0.0;
+        let mut mag_chi2_n = 0usize;
+        for i in 0..data.times.len() {
+            let pred_flux = svi_preds[i] * data.peak_flux_obs;
+            if pred_flux > 0.0 && data.flux[i] > 0.0 {
+                let mag_pred = flux_to_mag(pred_flux);
+                let mag_obs = mags_obs[i];
+                let mag_err = 1.0857 * data.flux_err[i] / data.flux[i];
+                if mag_err > 0.0 {
+                    let residual = mag_obs - mag_pred;
+                    mag_chi2_sum += residual * residual / (mag_err * mag_err);
+                    mag_chi2_n += 1;
+                }
+            }
+        }
+        let mag_chi2 = if mag_chi2_n > 0 { mag_chi2_sum / mag_chi2_n as f64 } else { f64::NAN };
 
         results.push(BandFitOutput {
             object: object_name.to_string(),
@@ -1196,6 +1639,7 @@ fn process_file(
             pso_time_s: pso_time,
             svi_time_s: svi_time,
             n_obs: data.times.len(),
+            mag_chi2,
         });
 
         if do_plot {
@@ -1228,15 +1672,15 @@ fn process_file(
         for (i, name) in param_names.iter().enumerate() {
             let sigma = r.svi_log_sigma[i].exp();
             csv_rows.push(format!(
-                "{},{},{},{},{:.6},{:.6},{:.6},{:.4},{:.4}",
+                "{},{},{},{},{:.6},{:.6},{:.6},{:.4},{:.4},{:.4}",
                 r.object, r.band, r.model.name(), name,
-                r.pso_params[i], r.svi_mu[i], sigma, r.pso_chi2, r.svi_elbo,
+                r.pso_params[i], r.svi_mu[i], sigma, r.pso_chi2, r.svi_elbo, r.mag_chi2,
             ));
         }
     }
     let csv_path = output_dir.join(format!("{}_svi_params.csv", object_name));
     let mut csv_content =
-        String::from("object,band,model,param,pso_value,svi_mean,svi_std,pso_chi2,svi_elbo\n");
+        String::from("object,band,model,param,pso_value,svi_mean,svi_std,pso_chi2,svi_elbo,mag_chi2\n");
     for row in &csv_rows {
         csv_content.push_str(row);
         csv_content.push('\n');
@@ -1258,8 +1702,9 @@ fn plot_comparison(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Collect unique parameter names across all models
     let param_order: Vec<&str> = vec![
-        "log_a", "b", "beta", "alpha", "log_gamma", "t0",
-        "log_tau_rise", "log_tau_fall", "log_sigma_extra",
+        "log_a", "b", "beta", "alpha", "alpha1", "alpha2", "n", "log_gamma", "t0",
+        "log_tau_rise", "log_tau_fall", "log_tau_m", "log_tau_sd",
+        "log_tau_diff", "log_tau_tr", "log_t_b", "logit_f", "log_sigma_extra",
         "log10_mej", "log10_vej", "log10_kappa_r",
     ];
 
@@ -1364,12 +1809,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if arg.starts_with("--") { continue; }
         if arg.ends_with(".csv") {
             targets.push(arg.clone());
+        } else if Path::new(arg).is_dir() {
+            // Scan directory for CSV files
+            if let Ok(entries) = fs::read_dir(arg) {
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        let path = entry.path();
+                        if path.extension().and_then(|s| s.to_str()) == Some("csv") {
+                            if let Some(s) = path.to_str() {
+                                targets.push(s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     if targets.is_empty() {
         let dir = Path::new("lightcurves_csv");
         if !dir.exists() {
-            eprintln!("Usage: fit_svi_lightcurves [--no-plot] [--quiet] [file.csv ...]");
+            eprintln!("Usage: fit_svi_lightcurves [--no-plot] [--quiet] [file.csv ... | dir]");
             eprintln!("  With no files, processes all CSVs in lightcurves_csv/");
             std::process::exit(1);
         }
@@ -1430,16 +1889,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Write global CSV
     let global_csv_path = output_dir.join("all_svi_params.csv");
     let mut csv = String::from(
-        "object,band,model,param,pso_value,svi_mean,svi_std,pso_chi2,svi_elbo\n",
+        "object,band,model,param,pso_value,svi_mean,svi_std,pso_chi2,svi_elbo,mag_chi2\n",
     );
     for r in &all_results {
         let names = r.model.param_names();
         for (i, name) in names.iter().enumerate() {
             let sigma = r.svi_log_sigma[i].exp();
             csv.push_str(&format!(
-                "{},{},{},{},{:.6},{:.6},{:.6},{:.4},{:.4}\n",
+                "{},{},{},{},{:.6},{:.6},{:.6},{:.4},{:.4},{:.4}\n",
                 r.object, r.band, r.model.name(), name,
-                r.pso_params[i], r.svi_mu[i], sigma, r.pso_chi2, r.svi_elbo,
+                r.pso_params[i], r.svi_mu[i], sigma, r.pso_chi2, r.svi_elbo, r.mag_chi2,
             ));
         }
     }
