@@ -9,23 +9,23 @@ pub fn prepare_photometry(photometry: &mut Vec<PhotometryMag>) {
 }
 
 // have a version of linear_fit that takes time, mag, and mag_err as separate vectors
-fn linear_fit(time: Vec<f32>, mag: Vec<f32>, mag_err: Vec<f32>) -> Option<LinearFitResult> {
+fn linear_fit(time: Vec<f64>, mag: Vec<f64>, mag_err: Vec<f64>) -> Option<LinearFitResult> {
     if time.len() < 2 || mag.len() < 2 || mag_err.len() < 2 {
         return None; // not enough data for a fit
     }
 
-    let n = time.len() as f32;
-    let sum_x: f32 = time.iter().sum();
-    let sum_y: f32 = mag.iter().sum();
-    let sum_xy: f32 = time.iter().zip(mag.iter()).map(|(x, y)| x * y).sum();
-    let sum_xx: f32 = time.iter().map(|x| x.powi(2)).sum();
+    let n = time.len() as f64;
+    let sum_x: f64 = time.iter().sum();
+    let sum_y: f64 = mag.iter().sum();
+    let sum_xy: f64 = time.iter().zip(mag.iter()).map(|(x, y)| x * y).sum();
+    let sum_xx: f64 = time.iter().map(|x| x.powi(2)).sum();
 
     let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x.powi(2));
     let intercept = (sum_y - slope * sum_x) / n;
 
     // calculate r-squared
-    let ss_total: f32 = mag.iter().map(|y| (y - (sum_y / n)).powi(2)).sum();
-    let ss_residual: f32 = mag
+    let ss_total: f64 = mag.iter().map(|y| (y - (sum_y / n)).powi(2)).sum();
+    let ss_residual: f64 = mag
         .iter()
         .zip(time.iter())
         .map(|(y, x)| (y - (slope * x + intercept)).powi(2))
@@ -134,16 +134,16 @@ pub fn analyze_photometry(
             let mut before_time = Vec::new();
             let mut before_mag = Vec::new();
             let mut before_mag_err = Vec::new();
-            let mut min_mag = f32::INFINITY;
-            let mut min_mag_err = f32::INFINITY;
-            let mut max_mag = f32::NEG_INFINITY;
-            let mut max_mag_err = f32::NEG_INFINITY;
+            let mut min_mag = f64::INFINITY;
+            let mut min_mag_err = f64::INFINITY;
+            let mut max_mag = f64::NEG_INFINITY;
+            let mut max_mag_err = f64::NEG_INFINITY;
 
             // get the min time for the before and after segments
             let before_min_time = before[0].time;
 
             for m in before {
-                before_time.push((m.time - before_min_time) as f32);
+                before_time.push((m.time - before_min_time) as f64);
                 before_mag.push(m.mag);
                 before_mag_err.push(m.mag_err);
                 if m.mag < min_mag {
@@ -179,15 +179,15 @@ pub fn analyze_photometry(
             let mut after_time = Vec::new();
             let mut after_mag = Vec::new();
             let mut after_mag_err = Vec::new();
-            let mut min_mag = f32::INFINITY;
-            let mut min_mag_err = f32::INFINITY;
-            let mut max_mag = f32::NEG_INFINITY;
-            let mut max_mag_err = f32::NEG_INFINITY;
+            let mut min_mag = f64::INFINITY;
+            let mut min_mag_err = f64::INFINITY;
+            let mut max_mag = f64::NEG_INFINITY;
+            let mut max_mag_err = f64::NEG_INFINITY;
 
             let after_min_time = after[0].time;
 
             for m in after {
-                after_time.push((m.time - after_min_time) as f32);
+                after_time.push((m.time - after_min_time) as f64);
                 after_mag.push(m.mag);
                 after_mag_err.push(m.mag_err);
                 if m.mag < min_mag {

@@ -5,33 +5,33 @@ use plotters::prelude::*;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::f32::consts::LN_10;
+use std::f64::consts::LN_10;
 use std::time::Instant;
 use lightcurve_fiting::lightcurve_common::{read_ztf_lightcurve, median, extract_rise_timescale, extract_decay_timescale, compute_fwhm, compute_rise_rate, compute_decay_rate};
 struct FastGP {
-    lengthscale: f32,
+    lengthscale: f64,
 }
 
 impl FastGP {
-    fn new(t_max: f32) -> Self {
+    fn new(t_max: f64) -> Self {
         // Shorter lengthscale (t_max / 8) to capture early rapid rises
         // Long transients still get smoothed late-time behavior, but early rise is preserved
         let lengthscale = (t_max / 8.0).max(1.0).min(40.0);
         Self { lengthscale }
     }
 
-    fn fit(&self, times: &Array1<f32>, values: &Array1<f32>, errors: &[f32]) -> Option<GaussianProcess<f32, ConstantMean, SquaredExponentialCorr>> {
+    fn fit(&self, times: &Array1<f64>, values: &Array1<f64>, errors: &[f64]) -> Option<GaussianProcess<f64, ConstantMean, SquaredExponentialCorr>> {
         // Compute per-point noise variance from measurement errors, with early-time weighting
         // Early observations (first 20% of time range) get upweighted to capture rapid rises
         
         // Find time range
-        let t_min = times.iter().cloned().fold(f32::INFINITY, f32::min);
-        let t_max = times.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let t_min = times.iter().cloned().fold(f64::INFINITY, f64::min);
+        let t_max = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let t_range = t_max - t_min;
         let early_time_cutoff = t_min + 0.2 * t_range;  // First 20% of time range
         
         // Apply early-time weighting: reduce error bars for early observations to give them more weight
-        let weighted_errors: Vec<f32> = times.iter()
+        let weighted_errors: Vec<f64> = times.iter()
             .zip(errors.iter())
             .map(|(t, e)| {
                 if t <= &early_time_cutoff {
@@ -50,7 +50,7 @@ impl FastGP {
         
         // Build GP with specified lengthscale and noise from errors
         let noise_variance = if !weighted_errors.is_empty() {
-            weighted_errors.iter().map(|e| e * e).sum::<f32>() / weighted_errors.len() as f32
+            weighted_errors.iter().map(|e| e * e).sum::<f64>() / weighted_errors.len() as f64
         } else {
             1e-4
         };
@@ -58,7 +58,7 @@ impl FastGP {
         // Create dataset and fit GP
         let dataset = Dataset::new(xt, yt);
         
-        GaussianProcess::<f32, ConstantMean, SquaredExponentialCorr>::params(
+        GaussianProcess::<f64, ConstantMean, SquaredExponentialCorr>::params(
             ConstantMean::default(),
             SquaredExponentialCorr::default(),
         )
@@ -75,100 +75,100 @@ impl FastGP {
 struct TimescaleParams {
     object: String,   // Object name
     band: String,
-    rise_time: f32,   // Exponential rise timescale (days)
-    decay_time: f32,  // Exponential decay timescale (days)
-    t0: f32,          // Time of peak brightness (days from t_min)
-    peak_mag: f32,    // Peak magnitude
-    chi2: f32,        // Reduced chi^2
-    baseline_chi2: f32,
+    rise_time: f64,   // Exponential rise timescale (days)
+    decay_time: f64,  // Exponential decay timescale (days)
+    t0: f64,          // Time of peak brightness (days from t_min)
+    peak_mag: f64,    // Peak magnitude
+    chi2: f64,        // Reduced chi^2
+    baseline_chi2: f64,
     n_obs: usize,
-    fwhm: f32,        // Full Width at Half Maximum (days)
-    rise_rate: f32,   // Rise rate (mag/day) from early data
-    decay_rate: f32,  // Decay rate (mag/day) from late data
-    gp_dfdt_now: f32,
-    gp_dfdt_next: f32,
-    gp_d2fdt2_now: f32,
-    gp_predicted_mag_1d: f32,
-    gp_predicted_mag_2d: f32,
-    gp_time_to_peak: f32,
-    gp_extrap_slope: f32,
-    gp_T_peak: f32,
-    gp_T_now: f32,
-    gp_dTdt_peak: f32,
-    gp_dTdt_now: f32,
+    fwhm: f64,        // Full Width at Half Maximum (days)
+    rise_rate: f64,   // Rise rate (mag/day) from early data
+    decay_rate: f64,  // Decay rate (mag/day) from late data
+    gp_dfdt_now: f64,
+    gp_dfdt_next: f64,
+    gp_d2fdt2_now: f64,
+    gp_predicted_mag_1d: f64,
+    gp_predicted_mag_2d: f64,
+    gp_time_to_peak: f64,
+    gp_extrap_slope: f64,
+    gp_T_peak: f64,
+    gp_T_now: f64,
+    gp_dTdt_peak: f64,
+    gp_dTdt_now: f64,
     // New high-priority features
-    gp_sigma_f: f32,           // RMS of GP posterior mean
-    gp_peak_to_peak: f32,      // max(f̂) − min(f̂)
-    gp_snr_max: f32,           // max SNR
-    gp_dfdt_max: f32,          // max rise rate (most positive dfdt)
-    gp_dfdt_min: f32,          // max decline rate (most negative dfdt)
-    gp_frac_of_peak: f32,      // f_last / f_peak
-    gp_post_var_mean: f32,     // mean posterior variance
-    gp_post_var_max: f32,      // max posterior variance
-    gp_skewness: f32,          // skewness of f̂
-    gp_kurtosis: f32,          // kurtosis of f̂
-    gp_n_inflections: f32,     // number of inflection points in GP mean
+    gp_sigma_f: f64,           // RMS of GP posterior mean
+    gp_peak_to_peak: f64,      // max(f̂) − min(f̂)
+    gp_snr_max: f64,           // max SNR
+    gp_dfdt_max: f64,          // max rise rate (most positive dfdt)
+    gp_dfdt_min: f64,          // max decline rate (most negative dfdt)
+    gp_frac_of_peak: f64,      // f_last / f_peak
+    gp_post_var_mean: f64,     // mean posterior variance
+    gp_post_var_max: f64,      // max posterior variance
+    gp_skewness: f64,          // skewness of f̂
+    gp_kurtosis: f64,          // kurtosis of f̂
+    gp_n_inflections: f64,     // number of inflection points in GP mean
 }
 
 #[derive(Debug, Clone)]
 struct PredictiveFeatures {
-    gp_dfdt_now: f32,
-    gp_dfdt_next: f32,
-    gp_d2fdt2_now: f32,
-    gp_predicted_mag_1d: f32,
-    gp_predicted_mag_2d: f32,
-    gp_time_to_peak: f32,
-    gp_extrap_slope: f32,
-    gp_T_peak: f32,
-    gp_T_now: f32,
-    gp_dTdt_peak: f32,
-    gp_dTdt_now: f32,
+    gp_dfdt_now: f64,
+    gp_dfdt_next: f64,
+    gp_d2fdt2_now: f64,
+    gp_predicted_mag_1d: f64,
+    gp_predicted_mag_2d: f64,
+    gp_time_to_peak: f64,
+    gp_extrap_slope: f64,
+    gp_T_peak: f64,
+    gp_T_now: f64,
+    gp_dTdt_peak: f64,
+    gp_dTdt_now: f64,
     // New high-priority features
-    gp_sigma_f: f32,
-    gp_peak_to_peak: f32,
-    gp_snr_max: f32,
-    gp_dfdt_max: f32,
-    gp_dfdt_min: f32,
-    gp_frac_of_peak: f32,
-    gp_post_var_mean: f32,
-    gp_post_var_max: f32,
-    gp_skewness: f32,
-    gp_kurtosis: f32,
-    gp_n_inflections: f32,
+    gp_sigma_f: f64,
+    gp_peak_to_peak: f64,
+    gp_snr_max: f64,
+    gp_dfdt_max: f64,
+    gp_dfdt_min: f64,
+    gp_frac_of_peak: f64,
+    gp_post_var_mean: f64,
+    gp_post_var_max: f64,
+    gp_skewness: f64,
+    gp_kurtosis: f64,
+    gp_n_inflections: f64,
 }
 
 /// Subsample data for faster GP fitting using adaptive spacing
 /// Keeps all points if < 30, otherwise selects evenly-spaced points to target max_points
-fn subsample_data(times: &[f32], mags: &[f32], errors: &[f32], max_points: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+fn subsample_data(times: &[f64], mags: &[f64], errors: &[f64], max_points: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     if times.len() <= max_points {
         return (times.to_vec(), mags.to_vec(), errors.to_vec());
     }
     
     // Evenly space indices to select max_points from the full dataset
-    let step = times.len() as f32 / max_points as f32;
+    let step = times.len() as f64 / max_points as f64;
     let mut indices = Vec::with_capacity(max_points);
     for i in 0..max_points {
-        let idx = ((i as f32 + 0.5) * step).floor() as usize;
+        let idx = ((i as f64 + 0.5) * step).floor() as usize;
         indices.push(idx.min(times.len() - 1));
     }
     
-    let times_sub: Vec<f32> = indices.iter().map(|&i| times[i]).collect();
-    let mags_sub: Vec<f32> = indices.iter().map(|&i| mags[i]).collect();
-    let errors_sub: Vec<f32> = indices.iter().map(|&i| errors[i]).collect();
+    let times_sub: Vec<f64> = indices.iter().map(|&i| times[i]).collect();
+    let mags_sub: Vec<f64> = indices.iter().map(|&i| mags[i]).collect();
+    let errors_sub: Vec<f64> = indices.iter().map(|&i| errors[i]).collect();
     
     (times_sub, mags_sub, errors_sub)
 }
 
 fn compute_predictive_features(
-    gp: &GaussianProcess<f32, ConstantMean, SquaredExponentialCorr>,
-    t_last: f32,
-    t0: f32,
-    temps: &[f32],  // Temperature series
-    times_pred: &[f32],  // Times corresponding to temperatures
-    pred: &[f32],  // GP predictions (magnitudes)
-    std: &[f32],   // GP standard deviations
-    obs_mags: &[f32],  // Observed magnitudes
-    obs_errors: &[f32],  // Observed errors
+    gp: &GaussianProcess<f64, ConstantMean, SquaredExponentialCorr>,
+    t_last: f64,
+    t0: f64,
+    temps: &[f64],  // Temperature series
+    times_pred: &[f64],  // Times corresponding to temperatures
+    pred: &[f64],  // GP predictions (magnitudes)
+    std: &[f64],   // GP standard deviations
+    obs_mags: &[f64],  // Observed magnitudes
+    obs_errors: &[f64],  // Observed errors
 ) -> PredictiveFeatures {
 
     let dt = 1.0;
@@ -188,17 +188,17 @@ fn compute_predictive_features(
         let (t_peak_idx, t_peak_val) = temps.iter().enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, &v)| (i, v))
-            .unwrap_or((0, f32::NAN));
+            .unwrap_or((0, f64::NAN));
         
         // Current temperature (last value)
-        let t_now = temps.last().copied().unwrap_or(f32::NAN);
+        let t_now = temps.last().copied().unwrap_or(f64::NAN);
         
         // Temperature rate of change at peak
         let dt_temp = if times_pred.len() > 1 { times_pred[1] - times_pred[0] } else { 1.0 };
         let dtdt_peak = if t_peak_idx > 0 && t_peak_idx < temps.len() - 1 {
             (temps[t_peak_idx + 1] - temps[t_peak_idx - 1]) / (2.0 * dt_temp)
         } else {
-            f32::NAN
+            f64::NAN
         };
         
         // Current temperature derivative (last point)
@@ -207,37 +207,37 @@ fn compute_predictive_features(
             let dt_temp = times_pred[n-1] - times_pred[n-2];
             (temps[n-1] - temps[n-2]) / dt_temp
         } else {
-            f32::NAN
+            f64::NAN
         };
         
         (t_peak_val, t_now, dtdt_peak, dtdt_now)
     } else {
-        (f32::NAN, f32::NAN, f32::NAN, f32::NAN)
+        (f64::NAN, f64::NAN, f64::NAN, f64::NAN)
     };
 
     // Compute new high-priority features
     // 1. Variability strength
     let gp_sigma_f = if !pred.is_empty() {
-        let mean = pred.iter().sum::<f32>() / pred.len() as f32;
-        (pred.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / pred.len() as f32).sqrt()
+        let mean = pred.iter().sum::<f64>() / pred.len() as f64;
+        (pred.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / pred.len() as f64).sqrt()
     } else {
-        f32::NAN
+        f64::NAN
     };
     
     let gp_peak_to_peak = if !pred.is_empty() {
-        let max_mag = pred.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let min_mag = pred.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max_mag = pred.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let min_mag = pred.iter().cloned().fold(f64::INFINITY, f64::min);
         max_mag - min_mag
     } else {
-        f32::NAN
+        f64::NAN
     };
     
     let gp_snr_max = if !pred.is_empty() && !std.is_empty() && !obs_mags.is_empty() && !obs_errors.is_empty() {
         obs_mags.iter().zip(obs_errors.iter())
             .map(|(mag, err)| mag.abs() / err)
-            .fold(f32::NEG_INFINITY, f32::max)
+            .fold(f64::NEG_INFINITY, f64::max)
     } else {
-        f32::NAN
+        f64::NAN
     };
     
     // 2. Derivative features
@@ -245,76 +245,76 @@ fn compute_predictive_features(
         let dt_grid = times_pred[1] - times_pred[0];
         (0..pred.len()-1)
             .map(|i| (pred[i+1] - pred[i]) / dt_grid)
-            .fold(f32::NEG_INFINITY, f32::max)
+            .fold(f64::NEG_INFINITY, f64::max)
     } else {
-        f32::NAN
+        f64::NAN
     };
     
     let gp_dfdt_min = if pred.len() > 1 && times_pred.len() > 1 {
         let dt_grid = times_pred[1] - times_pred[0];
         (0..pred.len()-1)
             .map(|i| (pred[i+1] - pred[i]) / dt_grid)
-            .fold(f32::INFINITY, f32::min)
+            .fold(f64::INFINITY, f64::min)
     } else {
-        f32::NAN
+        f64::NAN
     };
     
     // 3. Phase feature
     let gp_frac_of_peak = if !pred.is_empty() {
-        let peak_mag = pred.iter().cloned().fold(f32::INFINITY, f32::min);
-        let last_mag = pred.last().copied().unwrap_or(f32::NAN);
+        let peak_mag = pred.iter().cloned().fold(f64::INFINITY, f64::min);
+        let last_mag = pred.last().copied().unwrap_or(f64::NAN);
         last_mag / peak_mag
     } else {
-        f32::NAN
+        f64::NAN
     };
     
     // 4. Uncertainty quantification
     let gp_post_var_mean = if !std.is_empty() {
-        std.iter().map(|s| s * s).sum::<f32>() / std.len() as f32
+        std.iter().map(|s| s * s).sum::<f64>() / std.len() as f64
     } else {
-        f32::NAN
+        f64::NAN
     };
     
     let gp_post_var_max = if !std.is_empty() {
-        std.iter().map(|s| s * s).fold(f32::NEG_INFINITY, f32::max)
+        std.iter().map(|s| s * s).fold(f64::NEG_INFINITY, f64::max)
     } else {
-        f32::NAN
+        f64::NAN
     };
     
     // 5. Statistical shape features
     let (gp_skewness, gp_kurtosis) = if !pred.is_empty() && pred.len() > 3 {
-        let mean = pred.iter().sum::<f32>() / pred.len() as f32;
-        let variance = pred.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / pred.len() as f32;
+        let mean = pred.iter().sum::<f64>() / pred.len() as f64;
+        let variance = pred.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / pred.len() as f64;
         let std_dev = variance.sqrt();
         
         if std_dev > 1e-10 {
             let skew = pred.iter()
                 .map(|&x| ((x - mean) / std_dev).powi(3))
-                .sum::<f32>() / pred.len() as f32;
+                .sum::<f64>() / pred.len() as f64;
             
             let kurt = pred.iter()
                 .map(|&x| ((x - mean) / std_dev).powi(4))
-                .sum::<f32>() / pred.len() as f32 - 3.0;  // Excess kurtosis
+                .sum::<f64>() / pred.len() as f64 - 3.0;  // Excess kurtosis
             
             (skew, kurt)
         } else {
-            (f32::NAN, f32::NAN)
+            (f64::NAN, f64::NAN)
         }
     } else {
-        (f32::NAN, f32::NAN)
+        (f64::NAN, f64::NAN)
     };
 
     // 6. Inflection points: count sign changes in second derivative of GP mean
     let gp_n_inflections = if pred.len() > 2 && times_pred.len() > 2 {
         // compute second derivative on prediction grid
         let dt_grid = times_pred[1] - times_pred[0];
-        let mut d2: Vec<f32> = Vec::with_capacity(pred.len().saturating_sub(2));
+        let mut d2: Vec<f64> = Vec::with_capacity(pred.len().saturating_sub(2));
         for i in 1..(pred.len()-1) {
             let v = (pred[i+1] - 2.0*pred[i] + pred[i-1]) / (dt_grid * dt_grid);
             d2.push(v);
         }
         // count sign changes where values exceed noise threshold
-        let eps = 1e-6_f32;
+        let eps = 1e-6_f64;
         let mut count = 0usize;
         for i in 0..(d2.len().saturating_sub(1)) {
             let a = d2[i];
@@ -325,9 +325,9 @@ fn compute_predictive_features(
                 }
             }
         }
-        count as f32
+        count as f64
     } else {
-        f32::NAN
+        f64::NAN
     };
 
     PredictiveFeatures {
@@ -356,7 +356,7 @@ fn compute_predictive_features(
     }
 }
 
-fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<TimescaleParams>), Box<dyn std::error::Error + Send + Sync>> {
+fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<TimescaleParams>), Box<dyn std::error::Error + Send + Sync>> {
     let object_name = input_path
         .split('/')
         .last()
@@ -372,8 +372,8 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
     }
     
     // Determine time range
-    let mut t_min = f32::INFINITY;
-    let mut t_max = f32::NEG_INFINITY;
+    let mut t_min = f64::INFINITY;
+    let mut t_max = f64::NEG_INFINITY;
     for band_data in bands.values() {
         for &t in &band_data.times {
             t_min = t_min.min(t);
@@ -383,8 +383,8 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
     let duration = t_max - t_min;
     
     // Determine magnitude range
-    let mut mag_min = f32::INFINITY;
-    let mut mag_max = f32::NEG_INFINITY;
+    let mut mag_min = f64::INFINITY;
+    let mut mag_max = f64::NEG_INFINITY;
     for band_data in bands.values() {
         for &mag in &band_data.mags {
             mag_min = mag_min.min(mag);
@@ -402,12 +402,12 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
     
     // Fit GPs for each band
     let gp = FastGP::new(duration);
-    let mut fits: HashMap<String, (GaussianProcess<f32, ConstantMean, SquaredExponentialCorr>, Vec<f32>, Vec<f32>, f32)> = HashMap::new();
+    let mut fits: HashMap<String, (GaussianProcess<f64, ConstantMean, SquaredExponentialCorr>, Vec<f64>, Vec<f64>, f64)> = HashMap::new();
     let mut timescale_params: Vec<TimescaleParams> = Vec::new();
     
     let n_pred = 50;  // Balance of speed (~14s) and visual smoothness
-    let times_pred: Vec<f32> = (0..n_pred)
-        .map(|i| t_min + (i as f32) * duration / (n_pred - 1) as f32)
+    let times_pred: Vec<f64> = (0..n_pred)
+        .map(|i| t_min + (i as f64) * duration / (n_pred - 1) as f64)
         .collect();
     let times_pred_arr = Array1::from_vec(times_pred.clone());
     let times_pred_2d = times_pred_arr.view().insert_axis(Axis(1)).to_owned();
@@ -447,7 +447,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
         
         let fit_start = Instant::now();
         if let Some(gp_fit) = gp.fit(&times_arr, &mags_arr, &errors_sub) {
-            let fit_elapsed = fit_start.elapsed().as_secs_f32();
+            let fit_elapsed = fit_start.elapsed().as_secs_f64();
             total_fit_time += fit_elapsed;
             
             let pred_arr = gp_fit.predict(&times_pred_2d).unwrap();
@@ -468,7 +468,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
                 let residual = band_data.mags[i] - pred_at_obs[i];
                 residuals_sq += residual * residual;
             }
-            let rms_residual = (residuals_sq / band_data.mags.len() as f32).sqrt();
+            let rms_residual = (residuals_sq / band_data.mags.len() as f64).sqrt();
             
             // Use RMS as a constant uncertainty estimate (conservative)
             // In reality, uncertainty varies with distance from data, but egobox doesn't expose this
@@ -479,8 +479,8 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
             {
                 let mut chi2 = 0.0;
                 let mut baseline_var = 0.0;
-                let mean_mag = band_data.mags.iter().sum::<f32>() / band_data.mags.len() as f32;
-                let _mean_err_sq = band_data.errors.iter().map(|e| e * e).sum::<f32>() / band_data.errors.len() as f32;
+                let mean_mag = band_data.mags.iter().sum::<f64>() / band_data.mags.len() as f64;
+                let _mean_err_sq = band_data.errors.iter().map(|e| e * e).sum::<f64>() / band_data.errors.len() as f64;
                 
                 for i in 0..band_data.mags.len() {
                     let residual = band_data.mags[i] - pred_at_obs[i];
@@ -488,8 +488,8 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
                     chi2 += residual * residual / err_sq;
                     baseline_var += (band_data.mags[i] - mean_mag).powi(2) / err_sq;
                 }
-                let chi2_reduced = chi2 / band_data.mags.len().max(1) as f32;
-                let baseline_chi2 = baseline_var / band_data.mags.len().max(1) as f32;
+                let chi2_reduced = chi2 / band_data.mags.len().max(1) as f64;
+                let baseline_chi2 = baseline_var / band_data.mags.len().max(1) as f64;
                 
                 // Compute rise/decay timescales from the prediction grid
                 // Find peak (minimum magnitude) in the GP prediction
@@ -623,8 +623,8 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
         .and_then(|b| fits.get(b));
 
     // Save prediction curve for first fitted band (for FWHM shading)
-    let mut first_pred: Option<Vec<f32>> = None;
-    let mut first_times: Option<Vec<f32>> = None;
+    let mut first_pred: Option<Vec<f64>> = None;
+    let mut first_times: Option<Vec<f64>> = None;
 
     for band_name in &band_names {
         let band_data = bands.get(band_name).unwrap();
@@ -638,7 +638,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
                 let t_arr = Array1::from_vec(band_data.times.clone());
                 let t_2d = t_arr.view().insert_axis(Axis(1)).to_owned();
                 let ref_band_pred_at_t = ref_gp.predict(&t_2d).unwrap().column(0).to_owned();
-                let mut deltas: Vec<f32> = band_data.mags.iter()
+                let mut deltas: Vec<f64> = band_data.mags.iter()
                     .zip(ref_band_pred_at_t.iter())
                     .map(|(m_obs, m_ref)| m_obs - m_ref)
                     .collect();
@@ -667,8 +667,8 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
 
             // Uncertainty band: combine GP uncertainty with observation noise in quadrature
             // σ_total = sqrt(σ_GP² + σ_obs²)
-            let mut upper: Vec<f32> = Vec::with_capacity(pred.len());
-            let mut lower: Vec<f32> = Vec::with_capacity(pred.len());
+            let mut upper: Vec<f64> = Vec::with_capacity(pred.len());
+            let mut lower: Vec<f64> = Vec::with_capacity(pred.len());
             let mut any_band = false;
             for (m, s) in pred.iter().zip(std.iter()) {
                 let s_gp = if s.is_finite() { *s } else { 0.0 };
@@ -680,7 +680,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
             }
 
             if any_band {
-                let mut area: Vec<(f32, f32)> = Vec::with_capacity(times_pred.len() * 2);
+                let mut area: Vec<(f64, f64)> = Vec::with_capacity(times_pred.len() * 2);
                 for i in 0..times_pred.len() {
                     area.push((times_pred[i], upper[i]));
                 }
@@ -696,7 +696,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
             } else {
                 color.stroke_width(2)
             };
-            let line: Vec<(f32, f32)> = times_pred.iter().zip(pred.iter()).map(|(t, m)| (*t, *m)).collect();
+            let line: Vec<(f64, f64)> = times_pred.iter().zip(pred.iter()).map(|(t, m)| (*t, *m)).collect();
             lc_chart.draw_series(std::iter::once(PathElement::new(line, style)))
                 .unwrap()
                 .label(if borrowed { format!("{} (ref)", band_name) } else { band_name.to_string() })
@@ -757,7 +757,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
             
             // Find peak index
             let mut peak_pred_idx = 0;
-            let mut min_mag = f32::INFINITY;
+            let mut min_mag = f64::INFINITY;
             for (i, &mag) in pred.iter().enumerate() {
                 if mag < min_mag {
                     min_mag = mag;
@@ -766,7 +766,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
             }
             
             // Find actual crossing points (same logic as compute_fwhm)
-            let mut fwhm_start = f32::NAN;
+            let mut fwhm_start = f64::NAN;
             for i in (0..peak_pred_idx).rev() {
                 if pred[i] >= half_max_mag {
                     fwhm_start = times_curve[i];
@@ -774,7 +774,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
                 }
             }
             
-            let mut fwhm_end = f32::NAN;
+            let mut fwhm_end = f64::NAN;
             for i in (peak_pred_idx + 1)..pred.len() {
                 if pred[i] >= half_max_mag {
                     fwhm_end = times_curve[i];
@@ -828,13 +828,13 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
         }
         
         if !mags.is_empty() {
-            let mean_mag = mags.iter().sum::<f32>() / mags.len() as f32;
+            let mean_mag = mags.iter().sum::<f64>() / mags.len() as f64;
             // Temperature-magnitude relation for bright transients:
             // Brighter (lower mag) = hotter
-            let temp = 15000.0 * 10.0_f32.powf((18.0 - mean_mag) / 5.0);
+            let temp = 15000.0 * 10.0_f64.powf((18.0 - mean_mag) / 5.0);
             let temp_clamped = temp.max(3000.0).min(50000.0);
 
-            let sigma_mag = if n_var > 0 { (mag_var / n_var as f32).sqrt() } else { 0.0 };
+            let sigma_mag = if n_var > 0 { (mag_var / n_var as f64).sqrt() } else { 0.0 };
             let temp_sigma = temp_clamped * (LN_10 / 5.0) * sigma_mag;
             let temp_sigma_clamped = temp_sigma.min(temp_clamped * 0.8); // avoid runaway fill
 
@@ -847,8 +847,8 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
     }
     
     // Temperature uncertainty band (from GP std propagation)
-    let mut temp_upper: Vec<f32> = Vec::with_capacity(times_pred.len());
-    let mut temp_lower: Vec<f32> = Vec::with_capacity(times_pred.len());
+    let mut temp_upper: Vec<f64> = Vec::with_capacity(times_pred.len());
+    let mut temp_lower: Vec<f64> = Vec::with_capacity(times_pred.len());
     let mut any_temp_band = false;
     for (t, s) in temps_recovered.iter().zip(temps_sigma.iter()) {
         let s_clamped = if s.is_finite() { (*s).max(0.0) } else { 0.0 };
@@ -858,8 +858,8 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
     }
     
     // Include error bars in y-axis limit calculation
-    let temp_min = temp_lower.iter().cloned().fold(f32::INFINITY, f32::min);
-    let temp_max = temp_upper.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let temp_min = temp_lower.iter().cloned().fold(f64::INFINITY, f64::min);
+    let temp_max = temp_upper.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let temp_range = temp_max - temp_min;
     let temp_plot_min = (temp_min - temp_range * 0.1).max(1000.0);
     let temp_plot_max = (temp_max + temp_range * 0.1).min(50000.0);
@@ -878,7 +878,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
         .draw()?;
     
     if any_temp_band {
-        let mut area: Vec<(f32, f32)> = Vec::with_capacity(times_pred.len() * 2);
+        let mut area: Vec<(f64, f64)> = Vec::with_capacity(times_pred.len() * 2);
         for i in 0..times_pred.len() {
             area.push((times_pred[i], temp_upper[i]));
         }
@@ -889,7 +889,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
     }
     
     // Draw recovered temperature
-    let temp_line: Vec<(f32, f32)> = times_pred.iter()
+    let temp_line: Vec<(f64, f64)> = times_pred.iter()
         .zip(temps_recovered.iter())
         .map(|(t, temp)| (*t, *temp))
         .collect();
@@ -907,17 +907,17 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
             let (t_peak_idx, t_peak_val) = temps_recovered.iter().enumerate()
                 .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(i, &v)| (i, v))
-                .unwrap_or((0, f32::NAN));
+                .unwrap_or((0, f64::NAN));
             
             // Current temperature (last value)
-            let t_now = temps_recovered.last().copied().unwrap_or(f32::NAN);
+            let t_now = temps_recovered.last().copied().unwrap_or(f64::NAN);
             
             // Temperature rate of change at peak
             let dt_temp = if times_pred.len() > 1 { times_pred[1] - times_pred[0] } else { 1.0 };
             let dtdt_peak = if t_peak_idx > 0 && t_peak_idx < temps_recovered.len() - 1 {
                 (temps_recovered[t_peak_idx + 1] - temps_recovered[t_peak_idx - 1]) / (2.0 * dt_temp)
             } else {
-                f32::NAN
+                f64::NAN
             };
             
             // Current temperature derivative (last point)
@@ -926,7 +926,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f32, Vec<Timesca
                 let dt_temp = times_pred[n-1] - times_pred[n-2];
                 (temps_recovered[n-1] - temps_recovered[n-2]) / dt_temp
             } else {
-                f32::NAN
+                f64::NAN
             };
             
             (t_peak_val, t_now, dtdt_peak, dtdt_now)

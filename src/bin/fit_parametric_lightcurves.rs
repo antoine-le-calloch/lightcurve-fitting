@@ -11,7 +11,7 @@ use plotters::prelude::*;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use wide::{f32x8, CmpLt};
-use lightcurve_fiting::lightcurve_common::read_ztf_lightcurve;
+use lightcurve_fiting::lightcurve_common::{read_ztf_lightcurve, read_ztf_lightcurve_f32};
 
 // Zeropoint consistent with GP plotter
 const ZP: f32 = 23.9;
@@ -657,9 +657,9 @@ fn compute_decay_rate(times: &[f32], mags: &[f32]) -> f32 {
     slope
 }
 
-//Sort lightcurve by times so we can avoid branching logic in hot loops in cost function
+//Sort lightcurve by times so we can avoid branching logic in loops in cost function
 fn read_lightcurve(path: &str) -> Result<HashMap<String, (Vec<f32>, Vec<f32>, Vec<f32>)>, Box<dyn std::error::Error + Send + Sync>> {
-    let bands = read_ztf_lightcurve(path, false)?;
+    let bands = read_ztf_lightcurve_f32(path, false)?;
     let result = bands
         .into_iter()
         .map(|(filter, bd)| {   

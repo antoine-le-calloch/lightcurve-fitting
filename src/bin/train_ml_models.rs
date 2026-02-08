@@ -28,7 +28,7 @@ fn load_classifications(path: &str) -> Result<HashMap<String, String>, Box<dyn E
 fn load_data_with_labels(
     param_file: &str,
     classifications: &HashMap<String, String>,
-) -> Result<(Vec<Vec<f32>>, Vec<String>, Vec<String>), Box<dyn Error>> {
+) -> Result<(Vec<Vec<f64>>, Vec<String>, Vec<String>), Box<dyn Error>> {
     let file = fs::File::open(param_file)?;
     let mut reader = csv::ReaderBuilder::new().from_reader(file);
     
@@ -54,13 +54,13 @@ fn load_data_with_labels(
                 let mut features = Vec::new();
                 for &col_idx in &numeric_cols {
                     if let Some(val_str) = record.get(col_idx) {
-                        if let Ok(val) = val_str.trim().parse::<f32>() {
+                        if let Ok(val) = val_str.trim().parse::<f64>() {
                             features.push(val);
                         } else {
-                            features.push(f32::NAN);
+                            features.push(f64::NAN);
                         }
                     } else {
-                        features.push(f32::NAN);
+                        features.push(f64::NAN);
                     }
                 }
                 
@@ -77,7 +77,7 @@ fn load_data_with_labels(
 }
 
 /// Fill NaN values with column medians
-fn fill_nan_with_median(data: &mut Vec<Vec<f32>>) {
+fn fill_nan_with_median(data: &mut Vec<Vec<f64>>) {
     if data.is_empty() {
         return;
     }
@@ -86,7 +86,7 @@ fn fill_nan_with_median(data: &mut Vec<Vec<f32>>) {
     
     // Compute medians for each feature
     for feat_idx in 0..n_features {
-        let mut col_values: Vec<f32> = data.iter()
+        let mut col_values: Vec<f64> = data.iter()
             .filter_map(|row| {
                 if feat_idx < row.len() && row[feat_idx].is_finite() {
                     Some(row[feat_idx])
@@ -115,7 +115,7 @@ fn fill_nan_with_median(data: &mut Vec<Vec<f32>>) {
 }
 
 /// Compute feature importance based on variance
-fn compute_feature_importance(data: &[Vec<f32>]) -> Vec<(usize, f32)> {
+fn compute_feature_importance(data: &[Vec<f64>]) -> Vec<(usize, f64)> {
     if data.is_empty() || data[0].is_empty() {
         return Vec::new();
     }
@@ -124,7 +124,7 @@ fn compute_feature_importance(data: &[Vec<f32>]) -> Vec<(usize, f32)> {
     let mut importances = Vec::new();
     
     for feat_idx in 0..n_features {
-        let col_values: Vec<f32> = data.iter()
+        let col_values: Vec<f64> = data.iter()
             .filter_map(|row| {
                 if feat_idx < row.len() && row[feat_idx].is_finite() {
                     Some(row[feat_idx])
@@ -135,10 +135,10 @@ fn compute_feature_importance(data: &[Vec<f32>]) -> Vec<(usize, f32)> {
             .collect();
         
         if !col_values.is_empty() {
-            let mean = col_values.iter().sum::<f32>() / col_values.len() as f32;
+            let mean = col_values.iter().sum::<f64>() / col_values.len() as f64;
             let variance = col_values.iter()
                 .map(|v| (v - mean).powi(2))
-                .sum::<f32>() / col_values.len() as f32;
+                .sum::<f64>() / col_values.len() as f64;
             importances.push((feat_idx, variance));
         } else {
             importances.push((feat_idx, 0.0));
@@ -161,7 +161,7 @@ fn compute_classification_stats(labels: &[String]) -> HashMap<String, usize> {
 
 /// Train and evaluate classifier using LightGBM
 fn train_classifier(
-    feature_data: Vec<Vec<f32>>,
+    feature_data: Vec<Vec<f64>>,
     labels: Vec<String>,
     name: &str,
 ) -> Result<(), Box<dyn Error>> {
@@ -215,13 +215,13 @@ fn train_classifier(
     // Train LightGBM classifier
     println!("\nTraining LightGBM classifier...");
     
-    // Prepare data for lightgbm3 (Vec<f32> in row-major order)
-    let mut train_data: Vec<f32> = Vec::with_capacity(n_samples * n_features);
+    // Prepare data for lightgbm3 (Vec<f64> in row-major order)
+    let mut train_data: Vec<f64> = Vec::with_capacity(n_samples * n_features);
     for row in &data {
         train_data.extend(row.iter());
     }
     
-    let train_labels: Vec<f32> = y_numeric.iter().map(|&v| v as f32).collect();
+    let train_labels: Vec<f64> = y_numeric.iter().map(|&v| v as f64).collect();
     
     // Create dataset
     let dataset = Dataset::from_slice(&train_data, &train_labels, n_features as i32, true)?;
@@ -247,7 +247,7 @@ fn train_classifier(
     // predictions is flat Vec with shape (n_samples * n_classes)
     for i in 0..n_samples {
         let mut best_class = 0usize;
-        let mut best_prob = f32::NEG_INFINITY;
+        let mut best_prob = f64::NEG_INFINITY;
         for c in 0..n_classes {
             let prob = predictions[i * n_classes + c];
             if prob > best_prob {
@@ -260,7 +260,7 @@ fn train_classifier(
         }
     }
     
-    let accuracy = correct as f32 / n_samples as f32;
+    let accuracy = correct as f64 / n_samples as f64;
     println!("✓ Training accuracy: {:.2}% ({}/{})", accuracy * 100.0, correct, n_samples);
     
     // Save the model
@@ -307,7 +307,7 @@ fn train_classifier(
     // Summary statistics
     println!("\nSummary Statistics:");
     for (idx, _) in importances.iter().take(5) {
-        let col_values: Vec<f32> = data.iter()
+        let col_values: Vec<f64> = data.iter()
             .filter_map(|row| {
                 if *idx < row.len() && row[*idx].is_finite() {
                     Some(row[*idx])
@@ -318,10 +318,10 @@ fn train_classifier(
             .collect();
         
         if !col_values.is_empty() {
-            let mean = col_values.iter().sum::<f32>() / col_values.len() as f32;
+            let mean = col_values.iter().sum::<f64>() / col_values.len() as f64;
             let var = col_values.iter()
                 .map(|v| (v - mean).powi(2))
-                .sum::<f32>() / col_values.len() as f32;
+                .sum::<f64>() / col_values.len() as f64;
             let std = var.sqrt();
             
             println!("  Feature {}: mean={:.4}, std={:.4}", idx, mean, std);
