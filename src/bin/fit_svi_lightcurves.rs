@@ -170,7 +170,7 @@ fn bazin_flux_eval(params: &[f64], t: f64) -> f64 {
 /// Analytical d(flux)/d(theta_j) for Bazin.
 /// params: [log_a, b, t0, log_tau_rise, log_tau_fall]
 #[inline]
-fn bazin_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
+fn bazin_flux_grad(params: &[f64], t: f64, out: &mut [f64]) {
     let a = params[0].exp();
     let t0 = params[2];
     let tau_rise = params[3].exp();
@@ -194,8 +194,12 @@ fn bazin_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     let d_log_tau_fall = base * dt / tau_fall;
 
     // d(flux)/d(log_sigma_extra) = 0 (sigma_extra affects likelihood, not flux prediction)
-    let d_log_sigma_extra = 0.0;
-    vec![d_log_a, d_b, d_t0, d_log_tau_rise, d_log_tau_fall, d_log_sigma_extra]
+    out[0] = d_log_a;
+    out[1] = d_b;
+    out[2] = d_t0;
+    out[3] = d_log_tau_rise;
+    out[4] = d_log_tau_fall;
+    out[5] = 0.0;
 }
 
 #[inline]
@@ -219,7 +223,7 @@ fn villar_flux_eval(params: &[f64], t: f64) -> f64 {
 /// Analytical d(flux)/d(theta_j) for Villar.
 /// params: [log_a, beta, log_gamma, t0, log_tau_rise, log_tau_fall, log_sigma_extra]
 #[inline]
-fn villar_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
+fn villar_flux_grad(params: &[f64], t: f64, out: &mut [f64]) {
     let a = params[0].exp();
     let beta = params[1];
     let gamma = params[2].exp();
@@ -273,9 +277,13 @@ fn villar_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     let d_log_tau_fall = a * sig_rise * w * d_pr_dlogtf;
 
     // d(flux)/d(log_sigma_extra) = 0 (not used in prediction)
-    let d_log_sigma_extra = 0.0;
-
-    vec![d_log_a, d_beta, d_log_gamma, d_t0, d_log_tau_rise, d_log_tau_fall, d_log_sigma_extra]
+    out[0] = d_log_a;
+    out[1] = d_beta;
+    out[2] = d_log_gamma;
+    out[3] = d_t0;
+    out[4] = d_log_tau_rise;
+    out[5] = d_log_tau_fall;
+    out[6] = 0.0;
 }
 
 /// TDE model: sigmoid rise + power-law decay + baseline.
@@ -305,7 +313,7 @@ fn tde_flux_eval(params: &[f64], t: f64) -> f64 {
 /// Analytical d(flux)/d(theta_j) for TDE model.
 /// params: [log_a, b, t0, log_tau_rise, log_tau_fall, alpha, log_sigma_extra]
 #[inline]
-fn tde_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
+fn tde_flux_grad(params: &[f64], t: f64, out: &mut [f64]) {
     let a = params[0].exp();
     let t0 = params[2];
     let tau_rise = params[3].exp();
@@ -352,9 +360,13 @@ fn tde_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     let d_alpha = a * sig * (-w.ln()) * decay;
 
     // d(flux)/d(log_sigma_extra) = 0
-    let d_log_sigma_extra = 0.0;
-
-    vec![d_log_a, d_b, d_t0, d_log_tau_rise, d_log_tau_fall, d_alpha, d_log_sigma_extra]
+    out[0] = d_log_a;
+    out[1] = d_b;
+    out[2] = d_t0;
+    out[3] = d_log_tau_rise;
+    out[4] = d_log_tau_fall;
+    out[5] = d_alpha;
+    out[6] = 0.0;
 }
 
 /// Arnett model: Ni-56/Co-56 radioactive decay with diffusion trapping.
@@ -388,7 +400,7 @@ fn arnett_flux_eval(params: &[f64], t: f64) -> f64 {
 }
 
 #[inline]
-fn arnett_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
+fn arnett_flux_grad(params: &[f64], t: f64, out: &mut [f64]) {
     let a = params[0].exp();
     let t0 = params[1];
     let tau_m = params[2].exp();
@@ -426,7 +438,11 @@ fn arnett_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     // d/d(logit_f): sigmoid derivative
     let d_logit_f = a * trap * (e_ni - e_co) * f * (1.0 - f);
 
-    vec![d_log_a, d_t0, d_log_tau_m, d_logit_f, 0.0]
+    out[0] = d_log_a;
+    out[1] = d_t0;
+    out[2] = d_log_tau_m;
+    out[3] = d_logit_f;
+    out[4] = 0.0;
 }
 
 /// Magnetar model: spindown luminosity with diffusion trapping.
@@ -452,7 +468,7 @@ fn magnetar_flux_eval(params: &[f64], t: f64) -> f64 {
 }
 
 #[inline]
-fn magnetar_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
+fn magnetar_flux_grad(params: &[f64], t: f64, out: &mut [f64]) {
     let a = params[0].exp();
     let t0 = params[1];
     let tau_sd = params[2].exp();
@@ -484,7 +500,11 @@ fn magnetar_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     // d/d(log_tau_diff): increasing tau_diff → less escapes → less flux
     let d_log_tau_diff = -2.0 * a * spindown * exp_x2 * x * x;
 
-    vec![d_log_a, d_t0, d_log_tau_sd, d_log_tau_diff, 0.0]
+    out[0] = d_log_a;
+    out[1] = d_t0;
+    out[2] = d_log_tau_sd;
+    out[3] = d_log_tau_diff;
+    out[4] = 0.0;
 }
 
 /// Shock cooling model: power-law cooling with Gaussian transparency cutoff.
@@ -509,7 +529,7 @@ fn shockcooling_flux_eval(params: &[f64], t: f64) -> f64 {
 }
 
 #[inline]
-fn shockcooling_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
+fn shockcooling_flux_grad(params: &[f64], t: f64, out: &mut [f64]) {
     let a = params[0].exp();
     let t0 = params[1];
     let n = params[2];
@@ -540,7 +560,11 @@ fn shockcooling_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     // d/d(log_tau_tr)
     let d_log_tau_tr = flux * 2.0 * ratio * ratio;
 
-    vec![d_log_a, d_t0, d_n, d_log_tau_tr, 0.0]
+    out[0] = d_log_a;
+    out[1] = d_t0;
+    out[2] = d_n;
+    out[3] = d_log_tau_tr;
+    out[4] = 0.0;
 }
 
 /// Afterglow model: smoothly broken power law (Beuermann+1999).
@@ -570,7 +594,7 @@ fn afterglow_flux_eval(params: &[f64], t: f64) -> f64 {
 }
 
 #[inline]
-fn afterglow_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
+fn afterglow_flux_grad(params: &[f64], t: f64, out: &mut [f64]) {
     let a = params[0].exp();
     let t0 = params[1];
     let t_b = params[2].exp();
@@ -612,7 +636,12 @@ fn afterglow_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     let d_alpha2 = a * (-0.5) * u.powf(-1.5) * 2.0 * ln_r * u2;
 
     // d(flux)/d(log_sigma_extra) = 0
-    vec![d_log_a, d_t0, d_log_t_b, d_alpha1, d_alpha2, 0.0]
+    out[0] = d_log_a;
+    out[1] = d_t0;
+    out[2] = d_log_t_b;
+    out[3] = d_alpha1;
+    out[4] = d_alpha2;
+    out[5] = 0.0;
 }
 
 #[inline]
@@ -630,16 +659,17 @@ fn eval_model(model: SviModel, params: &[f64], t: f64) -> f64 {
 }
 
 /// Analytical d(flux)/d(theta_j) for pointwise models.
+/// Writes gradient into pre-allocated `out` buffer.
 #[inline]
-fn eval_model_grad(model: SviModel, params: &[f64], t: f64) -> Vec<f64> {
+fn eval_model_grad(model: SviModel, params: &[f64], t: f64, out: &mut [f64]) {
     match model {
-        SviModel::Bazin => bazin_flux_grad(params, t),
-        SviModel::Villar => villar_flux_grad(params, t),
-        SviModel::Tde => tde_flux_grad(params, t),
-        SviModel::Arnett => arnett_flux_grad(params, t),
-        SviModel::Magnetar => magnetar_flux_grad(params, t),
-        SviModel::ShockCooling => shockcooling_flux_grad(params, t),
-        SviModel::Afterglow => afterglow_flux_grad(params, t),
+        SviModel::Bazin => bazin_flux_grad(params, t, out),
+        SviModel::Villar => villar_flux_grad(params, t, out),
+        SviModel::Tde => tde_flux_grad(params, t, out),
+        SviModel::Arnett => arnett_flux_grad(params, t, out),
+        SviModel::Magnetar => magnetar_flux_grad(params, t, out),
+        SviModel::ShockCooling => shockcooling_flux_grad(params, t, out),
+        SviModel::Afterglow => afterglow_flux_grad(params, t, out),
         SviModel::MetzgerKN => panic!("MetzgerKN requires batch evaluation"),
     }
 }
@@ -768,29 +798,6 @@ fn metzger_kn_eval_batch(params: &[f64], obs_times: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-/// Finite-difference gradient for MetzgerKN (batch).
-/// Returns grads[i][j] = d(pred_i)/d(theta_j).
-fn metzger_kn_grad_batch(params: &[f64], times: &[f64]) -> Vec<Vec<f64>> {
-    let n_times = times.len();
-    let n_params = 5; // log10_mej, log10_vej, log10_kappa_r, t0, log_sigma_extra
-    let n_phys = 4; // first 4 are physical; sigma_extra has 0 flux gradient
-
-    let base = metzger_kn_eval_batch(params, times);
-    let eps = 1e-5;
-    let mut grads: Vec<Vec<f64>> = vec![vec![0.0; n_params]; n_times];
-
-    for j in 0..n_phys {
-        let mut p_plus = params.to_vec();
-        p_plus[j] += eps;
-        let f_plus = metzger_kn_eval_batch(&p_plus, times);
-        for i in 0..n_times {
-            grads[i][j] = (f_plus[i] - base[i]) / eps;
-        }
-    }
-    // grads[i][4] (log_sigma_extra) stays 0.0
-    grads
-}
-
 // ---------------------------------------------------------------------------
 // Batch evaluation dispatch (works for all models)
 // ---------------------------------------------------------------------------
@@ -806,15 +813,26 @@ fn eval_model_batch(model: SviModel, params: &[f64], times: &[f64]) -> Vec<f64> 
     }
 }
 
-/// Gradient of model predictions w.r.t. params, at all times.
-/// Returns grads[i][j] = d(pred_i)/d(theta_j).
-#[inline]
-fn eval_model_grad_batch(model: SviModel, params: &[f64], times: &[f64]) -> Vec<Vec<f64>> {
-    if model.is_sequential() {
-        metzger_kn_grad_batch(params, times)
-    } else {
-        times.iter().map(|&t| eval_model_grad(model, params, t)).collect()
+/// Gradient for MetzgerKN, written into a flat buffer (n_times * n_params, row-major).
+fn metzger_kn_grad_batch_into(params: &[f64], times: &[f64], out: &mut [f64]) {
+    let n_times = times.len();
+    let n_params = 5;
+    let n_phys = 4;
+
+    let base = metzger_kn_eval_batch(params, times);
+    let eps = 1e-5;
+    // Zero the output
+    for v in out.iter_mut() { *v = 0.0; }
+
+    for j in 0..n_phys {
+        let mut p_plus = params.to_vec();
+        p_plus[j] += eps;
+        let f_plus = metzger_kn_eval_batch(&p_plus, times);
+        for i in 0..n_times {
+            out[i * n_params + j] = (f_plus[i] - base[i]) / eps;
+        }
     }
+    // out[i * n_params + 4] (log_sigma_extra) stays 0.0
 }
 
 // ---------------------------------------------------------------------------
@@ -1338,6 +1356,7 @@ fn svi_fit(
 ) -> SviFitResult {
     let n_params = model.n_params();
     let n_variational = 2 * n_params; // mu + log_sigma for each param
+    let n_obs = data.times.len();
 
     // Initialize variational parameters
     let mut var_params = vec![0.0; n_variational];
@@ -1359,22 +1378,44 @@ fn svi_fit(
     // Index of log_sigma_extra in the parameter vector
     let se_idx = model.sigma_extra_idx();
 
+    // Precompute priors (constant for the model)
+    let priors = prior_params(model);
+
+    // Pre-allocate ALL buffers outside loops (eliminates heap allocations in hot path)
+    let mut eps = vec![0.0; n_params];
+    let mut theta = vec![0.0; n_params];
+    let mut sigma = vec![0.0; n_params];
+    let mut preds = vec![0.0; n_obs];
+    let mut grad_buf = vec![0.0; n_params]; // reusable per-observation gradient
+    // Flat gradient buffer for MetzgerKN batch gradients (n_obs * n_params, row-major)
+    let mut kn_grads_flat = if model.is_sequential() {
+        vec![0.0; n_obs * n_params]
+    } else {
+        Vec::new()
+    };
+    let mut grad_mu = vec![0.0; n_params];
+    let mut grad_log_sigma = vec![0.0; n_params];
+    let mut dll_dtheta = vec![0.0; n_params];
+    let mut neg_elbo_grad = vec![0.0; n_variational];
+
     let mut final_elbo = f64::NEG_INFINITY;
 
     for step in 0..n_steps {
         let mu = &var_params[..n_params];
         let log_sigma = &var_params[n_params..];
-        let sigma: Vec<f64> = log_sigma.iter().map(|ls| ls.exp()).collect();
+        for j in 0..n_params {
+            sigma[j] = log_sigma[j].exp();
+        }
 
-        // Accumulators for gradients (we minimize -ELBO, so negate at the end)
-        let mut grad_mu = vec![0.0; n_params];
-        let mut grad_log_sigma = vec![0.0; n_params];
+        // Zero accumulators
+        for j in 0..n_params {
+            grad_mu[j] = 0.0;
+            grad_log_sigma[j] = 0.0;
+        }
         let mut elbo_sum = 0.0;
 
         for _ in 0..n_samples {
             // Draw epsilon ~ N(0, 1) and compute theta via reparameterization
-            let mut eps = vec![0.0; n_params];
-            let mut theta = vec![0.0; n_params];
             for j in 0..n_params {
                 let u1: f64 = rand::random::<f64>().max(1e-10);
                 let u2: f64 = rand::random::<f64>();
@@ -1386,14 +1427,19 @@ fn svi_fit(
             let sigma_extra = theta[se_idx].exp();
             let sigma_extra_sq = sigma_extra * sigma_extra;
 
-            // Compute log-likelihood and its gradient w.r.t. theta
-            // using batch evaluation (required for sequential models like MetzgerKN)
-            let mut preds = eval_model_batch(model, &theta, &data.times);
-            let mut grads = eval_model_grad_batch(model, &theta, &data.times);
+            // Compute predictions and gradients
+            let mut _kn_scale = 1.0;
+            if model.is_sequential() {
+                let batch = metzger_kn_eval_batch(&theta, &data.times);
+                preds.copy_from_slice(&batch);
+                metzger_kn_grad_batch_into(&theta, &data.times, &mut kn_grads_flat);
+            } else {
+                for (i, &t) in data.times.iter().enumerate() {
+                    preds[i] = eval_model(model, &theta, t);
+                }
+            }
 
-            // Renormalize MetzgerKN: model peaks at phase~0.01d but observations
-            // are normalized by max(observed flux) at detection times.
-            // Clamp scale to [0.1, 10.0]; skip sample if clamping is too severe.
+            // Renormalize MetzgerKN
             if model == SviModel::MetzgerKN {
                 let max_pred = preds.iter().zip(data.is_upper.iter())
                     .filter(|(_, is_up)| !**is_up)
@@ -1402,60 +1448,57 @@ fn svi_fit(
                 if max_pred > 1e-10 && max_pred.is_finite() {
                     let raw_scale = 1.0 / max_pred;
                     let scale = raw_scale.clamp(0.1, 10.0);
-                    // Skip this MC sample if clamping changed scale by >50%
                     if (raw_scale - scale).abs() / raw_scale > 0.5 {
                         continue;
                     }
+                    _kn_scale = scale;
                     for pred in preds.iter_mut() { *pred *= scale; }
-                    for grad_vec in grads.iter_mut() {
-                        for g in grad_vec.iter_mut() { *g *= scale; }
-                    }
+                    for g in kn_grads_flat.iter_mut() { *g *= scale; }
                 }
             }
 
             let mut log_lik = 0.0;
-            let mut dll_dtheta = vec![0.0; n_params];
+            for j in 0..n_params { dll_dtheta[j] = 0.0; }
 
-            for i in 0..data.times.len() {
+            for i in 0..n_obs {
                 let pred = preds[i];
                 if !pred.is_finite() { continue; }
                 let total_var = obs_var[i] + sigma_extra_sq;
                 let sigma_total = total_var.sqrt();
 
+                // Compute gradient for this observation into grad_buf
+                if model.is_sequential() {
+                    let base = i * n_params;
+                    grad_buf.copy_from_slice(&kn_grads_flat[base..base + n_params]);
+                } else {
+                    eval_model_grad(model, &theta, data.times[i], &mut grad_buf);
+                }
+
                 if data.is_upper[i] {
-                    // Upper limit: log Phi(z) where z = (f_upper - pred) / sigma_total
                     let z = (data.upper_flux[i] - pred) / sigma_total;
                     log_lik += log_normal_cdf(z);
 
-                    // d(log Phi(z))/d(pred) = -phi(z) / (Phi(z) * sigma_total)
-                    // = -(1/sigma_total) * phi(z)/Phi(z) (inverse Mills ratio)
                     let phi_z = (-0.5 * z * z).exp() / (2.0 * std::f64::consts::PI).sqrt();
                     let cdf_z = (0.5 * (1.0 + erf_approx(z * std::f64::consts::FRAC_1_SQRT_2))).max(1e-300);
                     let dll_dpred = -phi_z / (cdf_z * sigma_total);
 
                     for j in 0..n_params {
-                        if j != se_idx && grads[i][j].is_finite() {
-                            dll_dtheta[j] += dll_dpred * grads[i][j];
+                        if j != se_idx && grad_buf[j].is_finite() {
+                            dll_dtheta[j] += dll_dpred * grad_buf[j];
                         }
                     }
 
-                    // d(log Phi(z))/d(log_sigma_extra) via chain rule on z:
-                    // dz/d(sigma_total) = -(f_upper - pred) / sigma_total^2
-                    // d(sigma_total)/d(sigma_extra_sq) = 0.5 / sigma_total
-                    // d(sigma_extra_sq)/d(log_sigma_extra) = 2 * sigma_extra_sq
-                    // => dz/d(log_se) = -(f_upper - pred) * sigma_extra_sq / sigma_total^3
                     let dz_dlse = -(data.upper_flux[i] - pred) * sigma_extra_sq / (sigma_total * total_var);
                     dll_dtheta[se_idx] += (phi_z / cdf_z) * dz_dlse;
                 } else {
-                    // Detection: standard Gaussian likelihood
                     let residual = data.flux[i] - pred;
                     let inv_total = 1.0 / total_var;
                     let r2 = residual * residual;
                     log_lik += -0.5 * (r2 * inv_total + (2.0 * std::f64::consts::PI * total_var).ln());
 
                     for j in 0..n_params {
-                        if j != se_idx && grads[i][j].is_finite() {
-                            dll_dtheta[j] += residual * inv_total * grads[i][j];
+                        if j != se_idx && grad_buf[j].is_finite() {
+                            dll_dtheta[j] += residual * inv_total * grad_buf[j];
                         }
                     }
 
@@ -1464,28 +1507,19 @@ fn svi_fit(
             }
 
             // Log-prior: per-model Gaussian priors
-            let priors = prior_params(model);
             let mut log_prior = 0.0;
-            let mut dlp_dtheta = vec![0.0; n_params];
             for j in 0..n_params {
                 let (center, width) = priors[j];
                 let var = width * width;
                 log_prior += -0.5 * (theta[j] - center).powi(2) / var;
-                dlp_dtheta[j] = -(theta[j] - center) / var;
-            }
-
-            elbo_sum += log_lik + log_prior;
-
-            // Reparameterization trick gradients:
-            // d(ELBO)/d(mu_j) = d(log_lik+log_prior)/d(theta_j) * d(theta_j)/d(mu_j)
-            //                  = d(log_lik+log_prior)/d(theta_j) * 1
-            // d(ELBO)/d(log_sigma_j) = d(log_lik+log_prior)/d(theta_j) * d(theta_j)/d(log_sigma_j)
-            //                         = d(log_lik+log_prior)/d(theta_j) * sigma_j * eps_j
-            for j in 0..n_params {
-                let df_dtheta = dll_dtheta[j] + dlp_dtheta[j];
+                let dlp = -(theta[j] - center) / var;
+                // Accumulate reparameterization trick gradients inline
+                let df_dtheta = dll_dtheta[j] + dlp;
                 grad_mu[j] += df_dtheta;
                 grad_log_sigma[j] += df_dtheta * sigma[j] * eps[j];
             }
+
+            elbo_sum += log_lik + log_prior;
         }
 
         // Average over samples
@@ -1502,17 +1536,10 @@ fn svi_fit(
         final_elbo = elbo_sum + entropy;
 
         // d(entropy)/d(log_sigma_j) = 1
-        for j in 0..n_params {
-            grad_log_sigma[j] += 1.0;
-        }
-
         // Build the full gradient of -ELBO (we minimize -ELBO)
-        let mut neg_elbo_grad = Vec::with_capacity(n_variational);
         for j in 0..n_params {
-            neg_elbo_grad.push(-grad_mu[j]);
-        }
-        for j in 0..n_params {
-            neg_elbo_grad.push(-grad_log_sigma[j]);
+            neg_elbo_grad[j] = -(grad_mu[j]);
+            neg_elbo_grad[n_params + j] = -(grad_log_sigma[j] + 1.0);
         }
 
         // Adam step
@@ -1524,21 +1551,18 @@ fn svi_fit(
         }
 
         if step % 100 == 0 || step == n_steps - 1 {
-            let sigmas: Vec<f64> = (0..n_params).map(|i| var_params[n_params + i].exp()).collect();
             eprintln!(
-                "  [{}] step {:>4}/{}: ELBO = {:.4}, sigma = {:?}",
+                "  [{}] step {:>4}/{}: ELBO = {:.4}",
                 model.name(),
                 step,
                 n_steps,
                 final_elbo,
-                sigmas,
             );
         }
     }
 
     let mu = var_params[..n_params].to_vec();
     // Apply sigma inflation to calibrate mean-field VI posteriors.
-    // Adding ln(factor) to log_sigma is equivalent to multiplying sigma by factor.
     let log_inflation = SIGMA_INFLATION_FACTOR.ln();
     let log_sigma: Vec<f64> = var_params[n_params..]
         .iter()
@@ -1551,6 +1575,194 @@ fn svi_fit(
         log_sigma,
         elbo: final_elbo,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Post-SVI t0 profile refinement
+// ---------------------------------------------------------------------------
+
+/// Cheap 1D profile-likelihood sweep to refine t0 estimate and uncertainty.
+///
+/// After SVI converges, this sweeps t0 on a grid while holding other params
+/// at their SVI posterior means, evaluating the log-likelihood at each point.
+/// The profile peak gives a bias-corrected t0, and the profile width (where
+/// LL drops by 0.5 from peak) gives a proper 1-sigma uncertainty.
+///
+/// Cost: ~50 * n_obs model evaluations = negligible vs SVI.
+fn profile_t0_refine(result: &mut SviFitResult, data: &BandFitData) {
+    let model = result.model;
+    let t0_idx = model.t0_idx();
+    let se_idx = model.sigma_extra_idx();
+
+    let mu_t0 = result.mu[t0_idx];
+    let sigma_t0 = result.log_sigma[t0_idx].exp();
+
+    // Use a data-driven sweep range rather than centering on SVI mean,
+    // since the SVI mean may have converged to the wrong mode entirely.
+    // Sweep from 30 days before first detection to the peak time.
+    let t_first = data.times.iter().cloned().fold(f64::INFINITY, f64::min);
+    let mut peak_idx = 0;
+    let mut peak_val = f64::NEG_INFINITY;
+    for (i, &f) in data.flux.iter().enumerate() {
+        if f > peak_val { peak_val = f; peak_idx = i; }
+    }
+    let t_peak = data.times[peak_idx];
+    let t0_lo = t_first - 30.0;
+    let t0_hi = t_peak + 5.0;
+    if t0_lo >= t0_hi { return; }
+
+    let n_grid: usize = 50;
+    let obs_var: Vec<f64> = data.flux_err.iter().map(|e| e * e + 1e-10).collect();
+    let sigma_extra = result.mu[se_idx].exp();
+    let sigma_extra_sq = sigma_extra * sigma_extra;
+
+    let n_obs = data.times.len();
+    let mut params = result.mu.clone();
+    let mut best_t0 = mu_t0;
+    let mut best_ll = f64::NEG_INFINITY;
+    let mut t0_vals = Vec::with_capacity(n_grid);
+    let mut ll_vals = Vec::with_capacity(n_grid);
+
+    // Index of log_a (always param 0 for all models)
+    let log_a_idx = 0;
+    // Models with a baseline offset b (Bazin, TDE have b at index 1)
+    let has_baseline = matches!(model, SviModel::Bazin | SviModel::Tde);
+
+    for gi in 0..n_grid {
+        let t0 = t0_lo + (t0_hi - t0_lo) * gi as f64 / (n_grid - 1).max(1) as f64;
+
+        // Reset to SVI means with this t0
+        for j in 0..params.len() {
+            params[j] = result.mu[j];
+        }
+        params[t0_idx] = t0;
+
+        // Analytically re-fit amplitude (and baseline for Bazin/TDE).
+        // All models are linear in a = exp(log_a): flux = a * shape(t) [+ b]
+        // This is the optimal adjustment for each t0, stable and fast.
+        {
+            // Evaluate shape function with log_a = 0 (a = 1) and b = 0
+            let saved_log_a = params[log_a_idx];
+            params[log_a_idx] = 0.0;
+            let saved_b = if has_baseline { let v = params[1]; params[1] = 0.0; v } else { 0.0 };
+
+            let shapes = eval_model_batch(model, &params, &data.times);
+
+            if has_baseline {
+                // Weighted linear regression: flux = a * shape + b
+                // Minimize sum_i w_i * (flux_i - a*shape_i - b)^2
+                let mut sw = 0.0; let mut sy = 0.0; let mut sf = 0.0;
+                let mut syf = 0.0; let mut sff = 0.0;
+                for i in 0..n_obs {
+                    if data.is_upper[i] || !shapes[i].is_finite() { continue; }
+                    let w = 1.0 / (obs_var[i] + sigma_extra_sq);
+                    sw += w;
+                    sy += w * data.flux[i];
+                    sf += w * shapes[i];
+                    syf += w * data.flux[i] * shapes[i];
+                    sff += w * shapes[i] * shapes[i];
+                }
+                let det = sw * sff - sf * sf;
+                if det.abs() > 1e-20 {
+                    let a_opt = (sw * syf - sf * sy) / det;
+                    let b_opt = (sff * sy - sf * syf) / det;
+                    if a_opt > 1e-10 {
+                        params[log_a_idx] = a_opt.ln();
+                        params[1] = b_opt;
+                    } else {
+                        params[log_a_idx] = saved_log_a;
+                        params[1] = saved_b;
+                    }
+                } else {
+                    params[log_a_idx] = saved_log_a;
+                    params[1] = saved_b;
+                }
+            } else {
+                // Simple weighted least squares: flux = a * shape
+                // a_opt = sum(w_i * flux_i * shape_i) / sum(w_i * shape_i^2)
+                let mut num = 0.0;
+                let mut den = 0.0;
+                for i in 0..n_obs {
+                    if data.is_upper[i] || !shapes[i].is_finite() { continue; }
+                    let w = 1.0 / (obs_var[i] + sigma_extra_sq);
+                    num += w * data.flux[i] * shapes[i];
+                    den += w * shapes[i] * shapes[i];
+                }
+                if den > 1e-20 && num / den > 1e-10 {
+                    params[log_a_idx] = (num / den).ln();
+                } else {
+                    params[log_a_idx] = saved_log_a;
+                }
+            }
+        }
+
+        let mut preds = eval_model_batch(model, &params, &data.times);
+
+        // MetzgerKN renormalization
+        if model == SviModel::MetzgerKN {
+            let max_pred = preds.iter().zip(data.is_upper.iter())
+                .filter(|(_, is_up)| !**is_up)
+                .map(|(p, _)| *p)
+                .fold(f64::NEG_INFINITY, f64::max);
+            if max_pred > 1e-10 && max_pred.is_finite() {
+                let scale = (1.0 / max_pred).clamp(0.1, 10.0);
+                for pred in preds.iter_mut() { *pred *= scale; }
+            }
+        }
+
+        let se = params[se_idx].exp();
+        let se_sq = se * se;
+        let mut ll = 0.0;
+        for i in 0..n_obs {
+            let pred = preds[i];
+            if !pred.is_finite() { continue; }
+            let total_var = obs_var[i] + se_sq;
+            if data.is_upper[i] {
+                let z = (data.upper_flux[i] - pred) / total_var.sqrt();
+                ll += log_normal_cdf(z);
+            } else {
+                let residual = data.flux[i] - pred;
+                ll += -0.5 * (residual * residual / total_var
+                    + (2.0 * std::f64::consts::PI * total_var).ln());
+            }
+        }
+
+        t0_vals.push(t0);
+        ll_vals.push(ll);
+
+        if ll > best_ll {
+            best_ll = ll;
+            best_t0 = t0;
+        }
+    }
+
+    // Profile width: where LL drops by 0.5 from peak (1-sigma for chi2 with 1 dof)
+    let threshold = best_ll - 0.5;
+    let mut lo_bound = t0_vals[0];
+    let mut hi_bound = *t0_vals.last().unwrap();
+
+    for i in 0..n_grid {
+        if ll_vals[i] >= threshold {
+            lo_bound = t0_vals[i];
+            break;
+        }
+    }
+    for i in (0..n_grid).rev() {
+        if ll_vals[i] >= threshold {
+            hi_bound = t0_vals[i];
+            break;
+        }
+    }
+
+    let profile_sigma = ((hi_bound - lo_bound) / 2.0).max(0.01);
+
+    eprintln!(
+        "    profile_t0: {:.2} -> {:.2} (sigma: {:.3} -> {:.3})",
+        mu_t0, best_t0, sigma_t0, profile_sigma
+    );
+
+    result.mu[t0_idx] = best_t0;
+    result.log_sigma[t0_idx] = profile_sigma.ln();
 }
 
 // ---------------------------------------------------------------------------
@@ -1963,6 +2175,10 @@ fn process_file(
                 svi_result = retry_result;
             }
         }
+
+        // Step 3: Profile-likelihood refinement of t0 (always-on, negligible cost)
+        profile_t0_refine(&mut svi_result, data);
+
         let svi_time = svi_start.elapsed().as_secs_f64();
 
         // Compute reduced chi² in magnitude space using SVI posterior mean
