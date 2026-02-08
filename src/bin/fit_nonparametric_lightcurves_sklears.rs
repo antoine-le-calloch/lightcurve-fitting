@@ -100,6 +100,9 @@ struct TimescaleParams {
     gp_skewness: f64,
     gp_kurtosis: f64,
     gp_n_inflections: f64,
+    gp_amp: f64,
+    gp_lengthscale: f64,
+    gp_alpha: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -282,7 +285,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
         let mut best_params: Option<(f64, f64, f64)> = None; // (amp, lengthscale, alpha)
 
         let amp_candidates = vec![0.05, 0.1, 0.2, 0.4];
-        let ls_factors = vec![8.0, 12.0, 16.0];
+        let ls_factors = vec![4.0, 6.0, 8.0, 12.0, 16.0, 24.0];
         let avg_error_var = if !errors_sub.is_empty() { errors_sub.iter().map(|e| e*e).sum::<f64>() / errors_sub.len() as f64 } else { 1e-4 };
         // compute median dt to avoid lengthscales smaller than data sampling
         let mut dt_vec: Vec<f64> = Vec::new();
@@ -421,6 +424,9 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
                     gp_sigma_f: predictive.gp_sigma_f, gp_peak_to_peak: predictive.gp_peak_to_peak, gp_snr_max: predictive.gp_snr_max, gp_dfdt_max: predictive.gp_dfdt_max, gp_dfdt_min: predictive.gp_dfdt_min,
                     gp_frac_of_peak: predictive.gp_frac_of_peak, gp_post_var_mean: predictive.gp_post_var_mean, gp_post_var_max: predictive.gp_post_var_max, gp_skewness: predictive.gp_skewness, gp_kurtosis: predictive.gp_kurtosis,
                     gp_n_inflections: predictive.gp_n_inflections,
+                    gp_amp: best_params.map_or(f64::NAN, |p| p.0),
+                    gp_lengthscale: best_params.map_or(f64::NAN, |p| p.1),
+                    gp_alpha: best_params.map_or(f64::NAN, |p| p.2),
                 });
 
                 eprintln!("  {} chi2={:.3} (baseline={:.1}), N={}", band_name, chi2_reduced, baseline_chi2, band_data.mags.len());
@@ -684,7 +690,7 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
     // Save a compact CSV similar to original (reuse original writer if present)
     let csv_path = "gp_timescale_parameters_sklears.csv";
     if !timescale_params.is_empty() {
-        let mut csv_content = String::from("object,band,rise_time_days,decay_time_days,t0_days,peak_mag,chi2,baseline_chi2,n_obs,fwhm_days,rise_rate_mag_per_day,decay_rate_mag_per_day,gp_dfdt_now,gp_dfdt_next,gp_d2fdt2_now,gp_predicted_mag_1d,gp_predicted_mag_2d,gp_time_to_peak,gp_extrap_slope,gp_T_peak,gp_T_now,gp_dTdt_peak,gp_dTdt_now,gp_sigma_f,gp_peak_to_peak,gp_snr_max,gp_dfdt_max,gp_dfdt_min,gp_frac_of_peak,gp_post_var_mean,gp_post_var_max,gp_skewness,gp_kurtosis,gp_n_inflections\n");
+        let mut csv_content = String::from("object,band,rise_time_days,decay_time_days,t0_days,peak_mag,chi2,baseline_chi2,n_obs,fwhm_days,rise_rate_mag_per_day,decay_rate_mag_per_day,gp_dfdt_now,gp_dfdt_next,gp_d2fdt2_now,gp_predicted_mag_1d,gp_predicted_mag_2d,gp_time_to_peak,gp_extrap_slope,gp_T_peak,gp_T_now,gp_dTdt_peak,gp_dTdt_now,gp_sigma_f,gp_peak_to_peak,gp_snr_max,gp_dfdt_max,gp_dfdt_min,gp_frac_of_peak,gp_post_var_mean,gp_post_var_max,gp_skewness,gp_kurtosis,gp_n_inflections,gp_amp,gp_lengthscale,gp_alpha\n");
         for param in &timescale_params {
             let mut row: Vec<String> = Vec::new();
             row.push(param.object.clone()); row.push(param.band.clone()); row.push(format!("{:.3}", param.rise_time)); row.push(format!("{:.3}", param.decay_time)); row.push(format!("{:.3}", param.t0)); row.push(format!("{:.3}", param.peak_mag)); row.push(format!("{:.3}", param.chi2)); row.push(format!("{:.1}", param.baseline_chi2)); row.push(format!("{}", param.n_obs));
@@ -713,6 +719,9 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<Timesca
             row.push(if param.gp_skewness.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_skewness)});
             row.push(if param.gp_kurtosis.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_kurtosis)});
             row.push(if param.gp_n_inflections.is_nan() { String::from("NaN") } else { format!("{:.0}", param.gp_n_inflections)});
+            row.push(if param.gp_amp.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_amp)});
+            row.push(if param.gp_lengthscale.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_lengthscale)});
+            row.push(if param.gp_alpha.is_nan() { String::from("NaN") } else { format!("{:.6}", param.gp_alpha)});
             csv_content.push_str(&row.join(",")); csv_content.push_str("\n");
         }
           use std::fs::OpenOptions;
