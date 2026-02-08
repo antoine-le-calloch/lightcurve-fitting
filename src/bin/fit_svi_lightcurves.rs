@@ -787,11 +787,37 @@ fn eval_model_grad_batch(model: SviModel, params: &[f64], times: &[f64]) -> Vec<
 // PSO cost function for quick model selection
 // ---------------------------------------------------------------------------
 
+/// Approximate erf(x) using Abramowitz & Stegun 7.1.26.
+fn erf_approx(x: f64) -> f64 {
+    let a = x.abs();
+    let t = 1.0 / (1.0 + 0.3275911 * a);
+    let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    let val = 1.0 - poly * (-a * a).exp();
+    if x >= 0.0 { val } else { -val }
+}
+
+/// Approximate log(Phi(x)) where Phi is the standard normal CDF.
+/// Uses the identity Phi(x) = 0.5 * erfc(-x/sqrt(2)) and a rational
+/// approximation for erfc, accurate to ~1e-7.
+fn log_normal_cdf(x: f64) -> f64 {
+    if x > 8.0 { return 0.0; } // Phi(x) ≈ 1
+    if x < -30.0 { return -0.5 * x * x - 0.5 * (2.0 * std::f64::consts::PI).ln() - (-x).ln(); }
+    // Use erfc approximation (Abramowitz & Stegun 7.1.26)
+    let z = -x * std::f64::consts::FRAC_1_SQRT_2; // erfc(z) = 2*Phi(x) when z = -x/sqrt(2)
+    let t = 1.0 / (1.0 + 0.3275911 * z.abs());
+    let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    let erfc_z = poly * (-z * z).exp();
+    let phi = if z >= 0.0 { 0.5 * erfc_z } else { 1.0 - 0.5 * erfc_z };
+    (phi.max(1e-300)).ln()
+}
+
 #[derive(Clone)]
 struct PsoCost {
     times: Vec<f64>,
     flux: Vec<f64>,
     flux_err: Vec<f64>,
+    is_upper: Vec<bool>,
+    upper_flux: Vec<f64>,
     model: SviModel,
 }
 
@@ -811,9 +837,16 @@ impl CostFunction for PsoCost {
             if !pred.is_finite() {
                 return Ok(1e99);
             }
-            let diff = pred - self.flux[i];
             let total_var = self.flux_err[i] * self.flux_err[i] + sigma_extra_sq + 1e-10;
-            neg_ll += diff * diff / total_var + total_var.ln();
+            if self.is_upper[i] {
+                // Upper limit: log Phi((f_upper - f_pred) / sigma_total)
+                let z = (self.upper_flux[i] - pred) / total_var.sqrt();
+                neg_ll -= log_normal_cdf(z);
+            } else {
+                // Detection: standard Gaussian
+                let diff = pred - self.flux[i];
+                neg_ll += diff * diff / total_var + total_var.ln();
+            }
         }
         Ok(neg_ll / n)
     }
@@ -850,6 +883,8 @@ fn pso_model_select(data: &BandFitData) -> (SviModel, Vec<f64>, f64) {
             times: data.times.clone(),
             flux: data.flux.clone(),
             flux_err: data.flux_err.clone(),
+            is_upper: data.is_upper.clone(),
+            upper_flux: data.upper_flux.clone(),
             model,
         };
         let solver = ParticleSwarm::new((lower, upper), 40);
@@ -1159,21 +1194,48 @@ fn svi_fit(
             for i in 0..data.times.len() {
                 let pred = preds[i];
                 if !pred.is_finite() { continue; }
-                let residual = data.flux[i] - pred;
                 let total_var = obs_var[i] + sigma_extra_sq;
-                let inv_total = 1.0 / total_var;
-                let r2 = residual * residual;
-                log_lik += -0.5 * (r2 * inv_total + (2.0 * std::f64::consts::PI * total_var).ln());
+                let sigma_total = total_var.sqrt();
 
-                // Gradient w.r.t. flux model parameters
-                for j in 0..n_params {
-                    if j != se_idx && grads[i][j].is_finite() {
-                        dll_dtheta[j] += residual * inv_total * grads[i][j];
+                if data.is_upper[i] {
+                    // Upper limit: log Phi(z) where z = (f_upper - pred) / sigma_total
+                    let z = (data.upper_flux[i] - pred) / sigma_total;
+                    log_lik += log_normal_cdf(z);
+
+                    // d(log Phi(z))/d(pred) = -phi(z) / (Phi(z) * sigma_total)
+                    // = -(1/sigma_total) * phi(z)/Phi(z) (inverse Mills ratio)
+                    let phi_z = (-0.5 * z * z).exp() / (2.0 * std::f64::consts::PI).sqrt();
+                    let cdf_z = (0.5 * (1.0 + erf_approx(z * std::f64::consts::FRAC_1_SQRT_2))).max(1e-300);
+                    let dll_dpred = -phi_z / (cdf_z * sigma_total);
+
+                    for j in 0..n_params {
+                        if j != se_idx && grads[i][j].is_finite() {
+                            dll_dtheta[j] += dll_dpred * grads[i][j];
+                        }
                     }
-                }
 
-                // Gradient w.r.t. log_sigma_extra
-                dll_dtheta[se_idx] += (r2 * inv_total * inv_total - inv_total) * sigma_extra_sq;
+                    // d(log Phi(z))/d(log_sigma_extra) via chain rule on z:
+                    // dz/d(sigma_total) = -(f_upper - pred) / sigma_total^2
+                    // d(sigma_total)/d(sigma_extra_sq) = 0.5 / sigma_total
+                    // d(sigma_extra_sq)/d(log_sigma_extra) = 2 * sigma_extra_sq
+                    // => dz/d(log_se) = -(f_upper - pred) * sigma_extra_sq / sigma_total^3
+                    let dz_dlse = -(data.upper_flux[i] - pred) * sigma_extra_sq / (sigma_total * total_var);
+                    dll_dtheta[se_idx] += (phi_z / cdf_z) * dz_dlse;
+                } else {
+                    // Detection: standard Gaussian likelihood
+                    let residual = data.flux[i] - pred;
+                    let inv_total = 1.0 / total_var;
+                    let r2 = residual * residual;
+                    log_lik += -0.5 * (r2 * inv_total + (2.0 * std::f64::consts::PI * total_var).ln());
+
+                    for j in 0..n_params {
+                        if j != se_idx && grads[i][j].is_finite() {
+                            dll_dtheta[j] += residual * inv_total * grads[i][j];
+                        }
+                    }
+
+                    dll_dtheta[se_idx] += (r2 * inv_total * inv_total - inv_total) * sigma_extra_sq;
+                }
             }
 
             // Log-prior: per-model Gaussian priors
@@ -1268,6 +1330,10 @@ struct BandFitData {
     times: Vec<f64>,
     flux: Vec<f64>,
     flux_err: Vec<f64>,
+    /// true = upper limit (SNR < 3); false = detection
+    is_upper: Vec<bool>,
+    /// For upper limits: 3-sigma flux ceiling (normalized); for detections: unused (0.0)
+    upper_flux: Vec<f64>,
     #[allow(dead_code)]
     noise_frac_median: f64,
     peak_flux_obs: f64,
@@ -1550,6 +1616,16 @@ fn process_file(
         }
         let normalized_flux: Vec<f64> = fluxes.iter().map(|f| f / peak_flux).collect();
         let normalized_err: Vec<f64> = flux_errs.iter().map(|e| e / peak_flux).collect();
+
+        // Flag upper limits: SNR < 3 in the original (un-normalized) flux
+        let is_upper: Vec<bool> = fluxes.iter().zip(flux_errs.iter())
+            .map(|(f, e)| *e > 0.0 && (*f / *e) < 3.0)
+            .collect();
+        // Upper limit ceiling = 3*sigma (normalized)
+        let upper_flux: Vec<f64> = flux_errs.iter()
+            .map(|e| 3.0 * e / peak_flux)
+            .collect();
+
         let mut frac_noises: Vec<f64> = normalized_flux
             .iter()
             .zip(normalized_err.iter())
@@ -1563,6 +1639,8 @@ fn process_file(
             times: times.clone(),
             flux: normalized_flux,
             flux_err: normalized_err,
+            is_upper,
+            upper_flux,
             noise_frac_median,
             peak_flux_obs: peak_flux,
         };
