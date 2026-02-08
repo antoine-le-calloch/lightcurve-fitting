@@ -6,8 +6,9 @@ use std::time::Instant;
 use argmin::core::{CostFunction, Error as ArgminError, Executor, State};
 use argmin::solver::particleswarm::ParticleSwarm;
 use plotters::prelude::*;
+use rayon::prelude::*;
 
-use lightcurve_fiting::lightcurve_common::{BandData, read_ztf_lightcurve};
+use lightcurve_fiting::lightcurve_common::{read_ztf_lightcurve};
 
 // Zeropoint consistent with GP plotter
 const ZP: f64 = 23.9;
@@ -44,21 +45,24 @@ struct BandFitData {
     times: Vec<f64>,
     flux: Vec<f64>,
     flux_err: Vec<f64>,
+    weights: Vec<f64>,      // Precomputed 1.0 / (flux_err² + 1e-10)
     noise_frac_median: f64,
     peak_flux_obs: f64,
 }
 
 #[derive(Clone)]
-struct SingleBandVillarCost {
-    band: BandFitData,
+struct SingleBandVillarCost<'a> {
+    band: &'a BandFitData,
     variant: ModelVariant,
 }
 
-impl CostFunction for SingleBandVillarCost {
+impl<'a> CostFunction for SingleBandVillarCost<'a> {
     type Param = Vec<f64>;
     type Output = f64;
 
     fn cost(&self, p: &Self::Param) -> Result<Self::Output, ArgminError> {
+        let n = self.band.times.len();
+        let inv_n = 1.0 / n.max(1) as f64;
         match self.variant {
             ModelVariant::PowerLaw => {
                 let a = p[0].exp();
@@ -71,87 +75,92 @@ impl CostFunction for SingleBandVillarCost {
                 }
 
                 let mut total_chi2 = 0.0;
-                let mut n = 0usize;
-                for i in 0..self.band.times.len() {
+                for i in 0..n {
                     let model = powerlaw_flux(a, alpha, t0, self.band.times[i]);
                     let diff = model - self.band.flux[i];
-                    // Use only observational errors in chi2, not sigma_extra
-                    let var = self.band.flux_err[i].powi(2) + 1e-10;
-                    total_chi2 += diff * diff / var;
-                    n += 1;
+                    total_chi2 += diff * diff * self.band.weights[i];
                 }
                 let penalty = if t0 < -100.0 || t0 > 50.0 || alpha < 0.0 || alpha > 5.0 {
                     1e6
                 } else {
                     0.0
                 };
-                // Add penalty for large sigma_extra to prevent overfitting
-                let sigma_penalty = (sigma_extra / 0.1).powi(2);
-                Ok(total_chi2 / n.max(1) as f64 + penalty + sigma_penalty)
+                let sigma_penalty = sigma_extra * sigma_extra * 100.0;
+                Ok(total_chi2 * inv_n + penalty + sigma_penalty)
             }
             ModelVariant::Bazin => {
-                // Bazin: [log_a, b, t0, log_tau_rise, log_tau_fall]
                 let a = p[0].exp();
                 let b = p[1];
                 let t0 = p[2];
-                let tau_rise = p[3].exp();
-                let tau_fall = p[4].exp();
+                let inv_tau_rise = 1.0 / p[3].exp();
+                let inv_tau_fall = 1.0 / p[4].exp();
 
-                if !a.is_finite() || !tau_rise.is_finite() || !tau_fall.is_finite() {
+                if !a.is_finite() || !inv_tau_rise.is_finite() || !inv_tau_fall.is_finite() {
                     return Ok(1e99);
                 }
 
                 let mut total_chi2 = 0.0;
-                let mut n = 0usize;
-                for i in 0..self.band.times.len() {
-                    let model = bazin_flux(a, b, t0, tau_rise, tau_fall, self.band.times[i]);
+                for i in 0..n {
+                    let dt = self.band.times[i] - t0;
+                    let num = (-dt * inv_tau_fall).exp();
+                    let den = 1.0 + (-dt * inv_tau_rise).exp();
+                    let model = a * (num / den) + b;
                     let diff = model - self.band.flux[i];
-                    let var = self.band.flux_err[i].powi(2) + 1e-10;
-                    total_chi2 += diff * diff / var;
-                    n += 1;
+                    total_chi2 += diff * diff * self.band.weights[i];
                 }
-                let penalty = if t0 < -100.0 || t0 > 100.0 || tau_rise < 1e-6 || tau_rise > 1e4 || tau_fall < 1e-6 || tau_fall > 1e4 {
+                let penalty = if t0 < -100.0 || t0 > 100.0 || inv_tau_rise > 1e6 || inv_tau_rise < 1e-4 || inv_tau_fall > 1e6 || inv_tau_fall < 1e-4 {
                     1e6
                 } else {
                     0.0
                 };
-                Ok(total_chi2 / n.max(1) as f64 + penalty)
+                Ok(total_chi2 * inv_n + penalty)
             }
             _ => {
                 let a = p[0].exp();
                 let beta = p[1];
                 let gamma = p[2].exp();
                 let t0 = p[3];
-                let tau_rise = p[4].exp();
-                let tau_fall = p[5].exp();
+                let inv_tau_rise = 1.0 / p[4].exp();
+                let inv_tau_fall = 1.0 / p[5].exp();
                 let sigma_extra = p[6].exp();
 
-                if !a.is_finite() || !gamma.is_finite() || !tau_rise.is_finite() || !tau_fall.is_finite() || !sigma_extra.is_finite() {
+                if !a.is_finite() || !gamma.is_finite() || !inv_tau_rise.is_finite() || !inv_tau_fall.is_finite() || !sigma_extra.is_finite() {
                     return Ok(1e99);
                 }
 
                 let mut total_chi2 = 0.0;
-                let mut n = 0usize;
-                for i in 0..self.band.times.len() {
+                for i in 0..n {
+                    let phase = self.band.times[i] - t0;
                     let model = match self.variant {
-                        ModelVariant::Full => villar_flux(a, beta, gamma, t0, tau_rise, tau_fall, self.band.times[i]),
-                        ModelVariant::DecayOnly | ModelVariant::FastDecay => villar_flux_decay(a, beta, gamma, t0, tau_fall, self.band.times[i]),
+                        ModelVariant::Full => {
+                            let sigmoid = 1.0 / (1.0 + (-phase * inv_tau_rise).exp());
+                            let piece = if phase < gamma {
+                                1.0 - beta * phase
+                            } else {
+                                (1.0 - beta * gamma) * ((gamma - phase) * inv_tau_fall).exp()
+                            };
+                            a * sigmoid * piece
+                        }
+                        ModelVariant::DecayOnly | ModelVariant::FastDecay => {
+                            let piece = if phase < gamma {
+                                1.0 - beta * phase
+                            } else {
+                                (1.0 - beta * gamma) * ((gamma - phase) * inv_tau_fall).exp()
+                            };
+                            a * piece
+                        }
                         ModelVariant::PowerLaw | ModelVariant::Bazin => unreachable!(),
                     };
                     let diff = model - self.band.flux[i];
-                    // Use only observational errors in chi2, not sigma_extra
-                    let var = self.band.flux_err[i].powi(2) + 1e-10;
-                    total_chi2 += diff * diff / var;
-                    n += 1;
+                    total_chi2 += diff * diff * self.band.weights[i];
                 }
-                let penalty = if t0 < -100.0 || t0 > 100.0 || tau_rise < 1e-6 || tau_rise > 1e4 || tau_fall < 1e-6 || tau_fall > 1e4 {
+                let penalty = if t0 < -100.0 || t0 > 100.0 || inv_tau_rise > 1e6 || inv_tau_rise < 1e-4 || inv_tau_fall > 1e6 || inv_tau_fall < 1e-4 {
                     1e6
                 } else {
                     0.0
                 };
-                // Add penalty for large sigma_extra to prevent overfitting
-                let sigma_penalty = (sigma_extra / 0.1).powi(2);
-                Ok(total_chi2 / n.max(1) as f64 + penalty + sigma_penalty)
+                let sigma_penalty = sigma_extra * sigma_extra * 100.0;
+                Ok(total_chi2 * inv_n + penalty + sigma_penalty)
             }
         }
     }
@@ -195,6 +204,7 @@ fn pso_bounds(base: Option<&[f64]>, variant: ModelVariant) -> (Vec<f64>, Vec<f64
     (lower, upper)
 }
 
+#[inline]
 pub fn villar_flux(a: f64, beta: f64, gamma: f64, t0: f64, tau_rise: f64, tau_fall: f64, t: f64) -> f64 {
     let phase = t - t0;
     let sigmoid = 1.0 / (1.0 + (-phase / tau_rise).exp());
@@ -206,6 +216,7 @@ pub fn villar_flux(a: f64, beta: f64, gamma: f64, t0: f64, tau_rise: f64, tau_fa
     a * sigmoid * piece
 }
 
+#[inline]
 pub fn villar_flux_decay(a: f64, beta: f64, gamma: f64, t0: f64, tau_fall: f64, t: f64) -> f64 {
     let phase = t - t0;
     let piece = if phase < gamma {
@@ -216,6 +227,7 @@ pub fn villar_flux_decay(a: f64, beta: f64, gamma: f64, t0: f64, tau_fall: f64, 
     a * piece
 }
 
+#[inline]
 pub fn powerlaw_flux(a: f64, alpha: f64, t0: f64, t: f64) -> f64 {
     let phase = t - t0;
     // Power law should apply for all observed times (phase > 0)
@@ -227,6 +239,7 @@ pub fn powerlaw_flux(a: f64, alpha: f64, t0: f64, t: f64) -> f64 {
     }
 }
 
+#[inline]
 pub fn bazin_flux(a: f64, b: f64, t0: f64, tau_rise: f64, tau_fall: f64, t: f64) -> f64 {
     let dt = t - t0;
     let num = (-(dt) / tau_fall).exp();
@@ -234,6 +247,7 @@ pub fn bazin_flux(a: f64, b: f64, t0: f64, tau_rise: f64, tau_fall: f64, t: f64)
     a * (num / den) + b
 }
 
+#[inline]
 fn flux_to_mag(flux: f64) -> f64 {
     -2.5 * flux.log10() + ZP
 }
@@ -348,11 +362,24 @@ fn compute_decay_rate(times: &[f64], mags: &[f64]) -> f64 {
 
 // Adapter function to convert BandData to the tuple format used by parametric fitting
 // Parametric fitting needs flux values (not magnitudes), so we pass convert_to_mag=false
-fn read_lightcurve(path: &str) -> Result<HashMap<String, (Vec<f64>, Vec<f64>, Vec<f64>)>, Box<dyn std::error::Error>> {
-    let bands = read_ztf_lightcurve(path, false)?;
+// Data is sorted by time for better cache locality in cost function loops
+fn read_lightcurve(path: &str) -> Result<HashMap<String, (Vec<f64>, Vec<f64>, Vec<f64>)>, Box<dyn std::error::Error + Send + Sync>> {
+    let bands = read_ztf_lightcurve(path, false)
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
     let result = bands
         .into_iter()
-        .map(|(filter, bd)| (filter, (bd.times, bd.mags, bd.errors)))
+        .map(|(filter, bd)| {
+            // Sort by time for cache locality and branchless loop potential
+            if bd.times.windows(2).all(|w| w[0] <= w[1]) {
+                return (filter, (bd.times, bd.mags, bd.errors));
+            }
+            let mut indices: Vec<usize> = (0..bd.times.len()).collect();
+            indices.sort_unstable_by(|&i, &j| bd.times[i].partial_cmp(&bd.times[j]).unwrap());
+            let times: Vec<f64> = indices.iter().map(|&i| bd.times[i]).collect();
+            let mags: Vec<f64> = indices.iter().map(|&i| bd.mags[i]).collect();
+            let errors: Vec<f64> = indices.iter().map(|&i| bd.errors[i]).collect();
+            (filter, (times, mags, errors))
+        })
         .collect();
     Ok(result)
 }
@@ -379,7 +406,7 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
     let run_fit = |base: Option<&[f64]>, variant: ModelVariant, iters: u64, particles: usize| {
         let (lower, upper) = pso_bounds(base, variant);
         let solver = ParticleSwarm::new((lower, upper), particles);
-        let problem = SingleBandVillarCost { band: data.clone(), variant };
+        let problem = SingleBandVillarCost { band: data, variant };
         let res = Executor::new(problem, solver)
             .configure(|state| state.max_iters(iters))
             .run()
@@ -626,7 +653,7 @@ fn fit_band(data: &BandFitData, times_pred: &[f64], ref_fit: Option<&RefFit>, fo
     (mags, mags_upper, mags_lower, chi2_best, format!("{:?}", variant), param_summary, params, timescale_params)
 }
 
-fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarTimescaleParams>), Box<dyn std::error::Error>> {
+fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarTimescaleParams>), Box<dyn std::error::Error + Send + Sync>> {
     let object_name = input_path
         .split('/')
         .last()
@@ -688,10 +715,14 @@ fn process_file(input_path: &str, output_dir: &Path) -> Result<(f64, Vec<VillarT
             mags_obs.push(m);
         }
 
+        let weights: Vec<f64> = normalized_err.iter()
+            .map(|e| 1.0 / (e * e + 1e-10))
+            .collect();
         let fit_data = BandFitData {
             times: times.clone(),
             flux: normalized_flux,
             flux_err: normalized_err,
+            weights,
             noise_frac_median,
             peak_flux_obs: peak_flux,
         };
@@ -926,7 +957,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut targets: Vec<String> = Vec::new();
     if args.len() >= 2 {
-        targets.push(args[1].clone());
+        for arg in &args[1..] {
+            let p = Path::new(arg);
+            if p.is_dir() {
+                // If argument is a directory, add all CSVs in it
+                if let Ok(entries) = fs::read_dir(p) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|s| s.to_str()) == Some("csv") {
+                            if let Some(s) = path.to_str() {
+                                targets.push(s.to_string());
+                            }
+                        }
+                    }
+                }
+            } else {
+                targets.push(arg.clone());
+            }
+        }
     } else {
         let dir = Path::new("lightcurves_csv");
         if !dir.exists() {
@@ -952,12 +1000,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_dir = Path::new("parametric_plots");
     fs::create_dir_all(output_dir)?;
 
+    let wall_start = Instant::now();
+
+    // Process files in parallel using rayon
+    let results: Vec<_> = targets.par_iter()
+        .map(|t| (t.clone(), process_file(t, output_dir)))
+        .collect();
+
+    let wall_elapsed = wall_start.elapsed().as_secs_f64();
+
     let mut total_fit_time = 0.0;
     let mut all_params: Vec<VillarTimescaleParams> = Vec::new();
-    
-    for (idx, t) in targets.iter().enumerate() {
-        println!("\n[{}/{}] Villar fitting {}", idx + 1, targets.len(), t);
-        match process_file(t, output_dir) {
+    for (t, result) in results {
+        match result {
             Ok((fit_time, params)) => {
                 total_fit_time += fit_time;
                 all_params.extend(params);
@@ -996,6 +1051,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n✓ Completed {} light curves", targets.len());
     println!("  Plots in {}", output_dir.display());
-    println!("  Total fitting time: {:.2}s", total_fit_time);
+    println!("  Total fitting time (all cores): {:.2}s", total_fit_time);
+    println!("  Wall-clock time: {:.2}s", wall_elapsed);
     Ok(())
 }
