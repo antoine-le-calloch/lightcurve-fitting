@@ -10,4 +10,3 @@ perf.data.old
 *.png
 *.csv
 nonparametric_plots
-Cargo.lock

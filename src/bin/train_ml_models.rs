@@ -221,7 +221,7 @@ fn train_classifier(
         train_data.extend(row.iter());
     }
     
-    let train_labels: Vec<f64> = y_numeric.iter().map(|&v| v as f64).collect();
+    let train_labels: Vec<f32> = y_numeric.iter().map(|&v| v as f64).collect();
     
     // Create dataset
     let dataset = Dataset::from_slice(&train_data, &train_labels, n_features as i32, true)?;
