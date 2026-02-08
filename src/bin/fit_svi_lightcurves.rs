@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use argmin::core::{CostFunction, Error as ArgminError, Executor, State};
 use argmin::solver::particleswarm::ParticleSwarm;
 use plotters::prelude::*;
+use rayon::prelude::*;
 
 use lightcurve_fiting::lightcurve_common::read_ztf_lightcurve;
 
@@ -131,6 +133,20 @@ impl SviModel {
         }
     }
 
+    /// Index of t0 in the parameter vector for this model.
+    fn t0_idx(self) -> usize {
+        match self {
+            SviModel::Bazin => 2,        // log_a, b, t0, ...
+            SviModel::Villar => 3,       // log_a, beta, log_gamma, t0, ...
+            SviModel::MetzgerKN => 3,    // log10_mej, log10_vej, log10_kappa_r, t0, ...
+            SviModel::Tde => 2,          // log_a, b, t0, ...
+            SviModel::Arnett => 1,       // log_a, t0, ...
+            SviModel::Magnetar => 1,     // log_a, t0, ...
+            SviModel::ShockCooling => 1, // log_a, t0, ...
+            SviModel::Afterglow => 1,    // log_a, t0, ...
+        }
+    }
+
     /// Whether this model requires batch (whole-lightcurve) evaluation.
     fn is_sequential(self) -> bool {
         matches!(self, SviModel::MetzgerKN)
@@ -138,6 +154,7 @@ impl SviModel {
 }
 
 // Plain f64 model evaluation
+#[inline]
 fn bazin_flux_eval(params: &[f64], t: f64) -> f64 {
     let a = params[0].exp();
     let b = params[1];
@@ -152,6 +169,7 @@ fn bazin_flux_eval(params: &[f64], t: f64) -> f64 {
 
 /// Analytical d(flux)/d(theta_j) for Bazin.
 /// params: [log_a, b, t0, log_tau_rise, log_tau_fall]
+#[inline]
 fn bazin_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     let a = params[0].exp();
     let t0 = params[2];
@@ -180,6 +198,7 @@ fn bazin_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     vec![d_log_a, d_b, d_t0, d_log_tau_rise, d_log_tau_fall, d_log_sigma_extra]
 }
 
+#[inline]
 fn villar_flux_eval(params: &[f64], t: f64) -> f64 {
     let a = params[0].exp();
     let beta = params[1];
@@ -199,6 +218,7 @@ fn villar_flux_eval(params: &[f64], t: f64) -> f64 {
 
 /// Analytical d(flux)/d(theta_j) for Villar.
 /// params: [log_a, beta, log_gamma, t0, log_tau_rise, log_tau_fall, log_sigma_extra]
+#[inline]
 fn villar_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     let a = params[0].exp();
     let beta = params[1];
@@ -261,6 +281,7 @@ fn villar_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
 /// TDE model: sigmoid rise + power-law decay + baseline.
 /// params: [log_a, b, t0, log_tau_rise, log_tau_fall, alpha, log_sigma_extra]
 /// flux = a * sig(phase/tau_rise) * (1 + softplus(phase)/tau_fall)^(-alpha) + b
+#[inline]
 fn tde_flux_eval(params: &[f64], t: f64) -> f64 {
     let a = params[0].exp();
     let b = params[1];
@@ -283,6 +304,7 @@ fn tde_flux_eval(params: &[f64], t: f64) -> f64 {
 
 /// Analytical d(flux)/d(theta_j) for TDE model.
 /// params: [log_a, b, t0, log_tau_rise, log_tau_fall, alpha, log_sigma_extra]
+#[inline]
 fn tde_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     let a = params[0].exp();
     let t0 = params[2];
@@ -340,6 +362,7 @@ fn tde_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
 /// flux = a * heat(t) * trap(t)
 ///   heat = f*exp(-t/τ_Ni) + (1-f)*exp(-t/τ_Co)  (radioactive heating)
 ///   trap = 1 - exp(-(t/τ_m)²)                    (diffusion trapping)
+#[inline]
 fn arnett_flux_eval(params: &[f64], t: f64) -> f64 {
     let a = params[0].exp();
     let t0 = params[1];
@@ -364,6 +387,7 @@ fn arnett_flux_eval(params: &[f64], t: f64) -> f64 {
     a * heat * trap
 }
 
+#[inline]
 fn arnett_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     let a = params[0].exp();
     let t0 = params[1];
@@ -408,6 +432,7 @@ fn arnett_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
 /// Magnetar model: spindown luminosity with diffusion trapping.
 /// params: [log_a, t0, log_tau_sd, log_tau_diff, log_sigma_extra]
 /// flux = a * (1 + t/τ_sd)^(-2) * (1 - exp(-(t/τ_diff)²))
+#[inline]
 fn magnetar_flux_eval(params: &[f64], t: f64) -> f64 {
     let a = params[0].exp();
     let t0 = params[1];
@@ -426,6 +451,7 @@ fn magnetar_flux_eval(params: &[f64], t: f64) -> f64 {
     a * spindown * trap
 }
 
+#[inline]
 fn magnetar_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     let a = params[0].exp();
     let t0 = params[1];
@@ -464,6 +490,7 @@ fn magnetar_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
 /// Shock cooling model: power-law cooling with Gaussian transparency cutoff.
 /// params: [log_a, t0, n, log_tau_tr, log_sigma_extra]
 /// flux = a * sigmoid(5*phase) * phase_soft^(-n) * exp(-(phase_soft/τ_tr)²)
+#[inline]
 fn shockcooling_flux_eval(params: &[f64], t: f64) -> f64 {
     let a = params[0].exp();
     let t0 = params[1];
@@ -481,6 +508,7 @@ fn shockcooling_flux_eval(params: &[f64], t: f64) -> f64 {
     a * sig5 * cooling * cutoff
 }
 
+#[inline]
 fn shockcooling_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     let a = params[0].exp();
     let t0 = params[1];
@@ -521,6 +549,7 @@ fn shockcooling_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
 /// alpha1 < alpha2: pre-break slope vs post-break (steeper) slope.
 /// For t << t_b: flux ~ a * (t/t_b)^(-alpha1)
 /// For t >> t_b: flux ~ a * (t/t_b)^(-alpha2)
+#[inline]
 fn afterglow_flux_eval(params: &[f64], t: f64) -> f64 {
     let a = params[0].exp();
     let t0 = params[1];
@@ -540,6 +569,7 @@ fn afterglow_flux_eval(params: &[f64], t: f64) -> f64 {
     a * u.powf(-0.5)
 }
 
+#[inline]
 fn afterglow_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     let a = params[0].exp();
     let t0 = params[1];
@@ -585,6 +615,7 @@ fn afterglow_flux_grad(params: &[f64], t: f64) -> Vec<f64> {
     vec![d_log_a, d_t0, d_log_t_b, d_alpha1, d_alpha2, 0.0]
 }
 
+#[inline]
 fn eval_model(model: SviModel, params: &[f64], t: f64) -> f64 {
     match model {
         SviModel::Bazin => bazin_flux_eval(params, t),
@@ -599,6 +630,7 @@ fn eval_model(model: SviModel, params: &[f64], t: f64) -> f64 {
 }
 
 /// Analytical d(flux)/d(theta_j) for pointwise models.
+#[inline]
 fn eval_model_grad(model: SviModel, params: &[f64], t: f64) -> Vec<f64> {
     match model {
         SviModel::Bazin => bazin_flux_grad(params, t),
@@ -765,6 +797,7 @@ fn metzger_kn_grad_batch(params: &[f64], times: &[f64]) -> Vec<Vec<f64>> {
 
 /// Evaluate model at all observation times. For pointwise models this just
 /// loops; for MetzgerKN it runs the full integration.
+#[inline]
 fn eval_model_batch(model: SviModel, params: &[f64], times: &[f64]) -> Vec<f64> {
     if model.is_sequential() {
         metzger_kn_eval_batch(params, times)
@@ -775,6 +808,7 @@ fn eval_model_batch(model: SviModel, params: &[f64], times: &[f64]) -> Vec<f64> 
 
 /// Gradient of model predictions w.r.t. params, at all times.
 /// Returns grads[i][j] = d(pred_i)/d(theta_j).
+#[inline]
 fn eval_model_grad_batch(model: SviModel, params: &[f64], times: &[f64]) -> Vec<Vec<f64>> {
     if model.is_sequential() {
         metzger_kn_grad_batch(params, times)
@@ -788,6 +822,7 @@ fn eval_model_grad_batch(model: SviModel, params: &[f64], times: &[f64]) -> Vec<
 // ---------------------------------------------------------------------------
 
 /// Approximate erf(x) using Abramowitz & Stegun 7.1.26.
+#[inline]
 fn erf_approx(x: f64) -> f64 {
     let a = x.abs();
     let t = 1.0 / (1.0 + 0.3275911 * a);
@@ -799,6 +834,7 @@ fn erf_approx(x: f64) -> f64 {
 /// Approximate log(Phi(x)) where Phi is the standard normal CDF.
 /// Uses the identity Phi(x) = 0.5 * erfc(-x/sqrt(2)) and a rational
 /// approximation for erfc, accurate to ~1e-7.
+#[inline]
 fn log_normal_cdf(x: f64) -> f64 {
     if x > 8.0 { return 0.0; } // Phi(x) ≈ 1
     if x < -30.0 { return -0.5 * x * x - 0.5 * (2.0 * std::f64::consts::PI).ln() - (-x).ln(); }
@@ -812,16 +848,16 @@ fn log_normal_cdf(x: f64) -> f64 {
 }
 
 #[derive(Clone)]
-struct PsoCost {
-    times: Vec<f64>,
-    flux: Vec<f64>,
-    flux_err: Vec<f64>,
-    is_upper: Vec<bool>,
-    upper_flux: Vec<f64>,
+struct PsoCost<'a> {
+    times: &'a [f64],
+    flux: &'a [f64],
+    flux_err: &'a [f64],
+    is_upper: &'a [bool],
+    upper_flux: &'a [f64],
     model: SviModel,
 }
 
-impl CostFunction for PsoCost {
+impl CostFunction for PsoCost<'_> {
     type Param = Vec<f64>;
     type Output = f64;
 
@@ -867,6 +903,138 @@ impl CostFunction for PsoCost {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Profile likelihood for t0
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct FixedT0PsoCost<'a> {
+    inner: PsoCost<'a>,
+    t0: f64,
+    t0_idx: usize,
+}
+
+impl CostFunction for FixedT0PsoCost<'_> {
+    type Param = Vec<f64>;
+    type Output = f64;
+
+    fn cost(&self, p: &Self::Param) -> Result<Self::Output, ArgminError> {
+        let mut full = Vec::with_capacity(p.len() + 1);
+        for (i, &val) in p.iter().enumerate() {
+            if i == self.t0_idx {
+                full.push(self.t0);
+            }
+            full.push(val);
+        }
+        if self.t0_idx >= p.len() {
+            full.push(self.t0);
+        }
+        self.inner.cost(&full)
+    }
+}
+
+fn pso_bounds_no_t0(model: SviModel) -> (Vec<f64>, Vec<f64>) {
+    let (mut lower, mut upper) = pso_bounds(model);
+    let idx = model.t0_idx();
+    lower.remove(idx);
+    upper.remove(idx);
+    (lower, upper)
+}
+
+fn linspace(start: f64, end: f64, n: usize) -> Vec<f64> {
+    if n <= 1 {
+        return vec![start];
+    }
+    let step = (end - start) / (n - 1) as f64;
+    (0..n).map(|i| start + i as f64 * step).collect()
+}
+
+/// Two-stage grid search over t0 (coarse 10 + fine 5 points).
+/// For each candidate t0, optimize all other parameters via PSO.
+/// Returns improved (params, cost) or the original if no improvement found.
+fn profile_t0_search(
+    data: &BandFitData,
+    model: SviModel,
+    pilot_params: &[f64],
+    pilot_cost: f64,
+) -> (Vec<f64>, f64) {
+    let t0_idx = model.t0_idx();
+    let pilot_t0 = pilot_params[t0_idx];
+    let t_first = data.times.iter().cloned().fold(f64::INFINITY, f64::min);
+    let t0_min = (pilot_t0 - 5.0).max(t_first - 10.0);
+    let t0_max = pilot_t0 + 5.0;
+
+    let run_at_t0 = |t0: f64| -> (Vec<f64>, f64) {
+        let (lower, upper) = pso_bounds_no_t0(model);
+        let inner = PsoCost {
+            times: &data.times,
+            flux: &data.flux,
+            flux_err: &data.flux_err,
+            is_upper: &data.is_upper,
+            upper_flux: &data.upper_flux,
+            model,
+        };
+        let problem = FixedT0PsoCost { inner, t0, t0_idx };
+        let solver = ParticleSwarm::new((lower, upper), 40);
+        match Executor::new(problem, solver)
+            .configure(|state| state.max_iters(60))
+            .run()
+        {
+            Ok(res) => {
+                let best = res.state().get_best_param().unwrap();
+                let cost = res.state().get_cost();
+                let mut full = Vec::with_capacity(best.position.len() + 1);
+                for (i, &val) in best.position.iter().enumerate() {
+                    if i == t0_idx {
+                        full.push(t0);
+                    }
+                    full.push(val);
+                }
+                if t0_idx >= best.position.len() {
+                    full.push(t0);
+                }
+                (full, cost)
+            }
+            Err(_) => (vec![], f64::INFINITY),
+        }
+    };
+
+    let mut best_params = pilot_params.to_vec();
+    let mut best_cost = pilot_cost;
+    let mut best_t0 = pilot_t0;
+
+    // Coarse grid: 10 points
+    for &t0 in &linspace(t0_min, t0_max, 10) {
+        let (params, cost) = run_at_t0(t0);
+        if cost < best_cost && !params.is_empty() {
+            best_cost = cost;
+            best_params = params;
+            best_t0 = t0;
+        }
+    }
+
+    // Fine grid: 5 points around best ± 0.5 days
+    let fine_min = (best_t0 - 0.5).max(t0_min);
+    let fine_max = (best_t0 + 0.5).min(t0_max);
+    for &t0 in &linspace(fine_min, fine_max, 5) {
+        let (params, cost) = run_at_t0(t0);
+        if cost < best_cost && !params.is_empty() {
+            best_cost = cost;
+            best_params = params;
+        }
+    }
+
+    if best_cost < pilot_cost {
+        let new_t0 = best_params[t0_idx];
+        eprintln!(
+            "    profile_t0: cost {:.4} -> {:.4}, t0 {:.2} -> {:.2}",
+            pilot_cost, best_cost, pilot_t0, new_t0
+        );
+    }
+
+    (best_params, best_cost)
+}
+
 /// PSO model selection: try models one at a time in priority order,
 /// stop as soon as one fits well enough (cost < EARLY_STOP_THRESHOLD).
 ///
@@ -895,11 +1063,11 @@ fn pso_model_select(data: &BandFitData) -> (SviModel, Vec<f64>, f64) {
     for &model in models {
         let (lower, upper) = pso_bounds(model);
         let problem = PsoCost {
-            times: data.times.clone(),
-            flux: data.flux.clone(),
-            flux_err: data.flux_err.clone(),
-            is_upper: data.is_upper.clone(),
-            upper_flux: data.upper_flux.clone(),
+            times: &data.times,
+            flux: &data.flux,
+            flux_err: &data.flux_err,
+            is_upper: &data.is_upper,
+            upper_flux: &data.upper_flux,
             model,
         };
         let solver = ParticleSwarm::new((lower, upper), 40);
@@ -1660,6 +1828,8 @@ fn process_file(
     svi_n_samples: usize,
     retry_enabled: bool,
     force_model: Option<SviModel>,
+    snr_threshold: f64,
+    profile_t0: bool,
 ) -> Result<Vec<BandFitOutput>, Box<dyn std::error::Error>> {
     let object_name = input_path
         .split('/')
@@ -1685,13 +1855,13 @@ fn process_file(
         let normalized_flux: Vec<f64> = fluxes.iter().map(|f| f / peak_flux).collect();
         let normalized_err: Vec<f64> = flux_errs.iter().map(|e| e / peak_flux).collect();
 
-        // Flag upper limits: SNR < 3 in the original (un-normalized) flux
+        // Flag upper limits: SNR < threshold in the original (un-normalized) flux
         let is_upper: Vec<bool> = fluxes.iter().zip(flux_errs.iter())
-            .map(|(f, e)| *e > 0.0 && (*f / *e) < 3.0)
+            .map(|(f, e)| *e > 0.0 && (*f / *e) < snr_threshold)
             .collect();
-        // Upper limit ceiling = 3*sigma (normalized)
+        // Upper limit ceiling = threshold*sigma (normalized)
         let upper_flux: Vec<f64> = flux_errs.iter()
-            .map(|e| 3.0 * e / peak_flux)
+            .map(|e| snr_threshold * e / peak_flux)
             .collect();
 
         let mut frac_noises: Vec<f64> = normalized_flux
@@ -1736,7 +1906,7 @@ fn process_file(
     let mut band_plots: Vec<BandPlot> = Vec::new();
     let mut results: Vec<BandFitOutput> = Vec::new();
 
-    for (band_name, data, mags_obs) in &band_entries {
+    for (band_idx, (band_name, data, mags_obs)) in band_entries.iter().enumerate() {
         let fit_start = Instant::now();
 
         // Step 1: PSO model selection (cascade or forced model)
@@ -1744,11 +1914,11 @@ fn process_file(
             // Run PSO for just the forced model
             let (lower, upper) = pso_bounds(forced);
             let problem = PsoCost {
-                times: data.times.clone(),
-                flux: data.flux.clone(),
-                flux_err: data.flux_err.clone(),
-                is_upper: data.is_upper.clone(),
-                upper_flux: data.upper_flux.clone(),
+                times: &data.times,
+                flux: &data.flux,
+                flux_err: &data.flux_err,
+                is_upper: &data.is_upper,
+                upper_flux: &data.upper_flux,
                 model: forced,
             };
             let solver = ParticleSwarm::new((lower, upper), 40);
@@ -1773,6 +1943,13 @@ fn process_file(
             eprintln!("  [{}] PSO returned no params, skipping band", band_name);
             continue;
         }
+
+        // Step 1b: Profile t0 grid search (reference band only)
+        let (pso_params, pso_chi2) = if profile_t0 && band_idx == 0 {
+            profile_t0_search(data, pso_model, &pso_params, pso_chi2)
+        } else {
+            (pso_params, pso_chi2)
+        };
 
         // Step 2: SVI refinement (with optional retry)
         let svi_start = Instant::now();
@@ -2002,6 +2179,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse --retry (retry with different settings if ELBO is catastrophic)
     let retry_enabled = args.iter().any(|a| a == "--retry");
 
+    // Parse --snr-threshold=3.0 (SNR below which points are treated as upper limits)
+    let snr_threshold: f64 = args.iter()
+        .find_map(|a| a.strip_prefix("--snr-threshold=").and_then(|v| v.parse().ok()))
+        .unwrap_or(3.0);
+
+    // Parse --profile-t0 (grid search for better t0 on reference band)
+    let profile_t0 = args.iter().any(|a| a == "--profile-t0");
+
     // Parse --force-model=Tde (skip PSO cascade, use this model for all bands)
     let force_model: Option<SviModel> = args.iter()
         .find_map(|a| a.strip_prefix("--force-model="))
@@ -2064,18 +2249,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_dir = Path::new("svi_plots");
     fs::create_dir_all(output_dir)?;
 
+    let progress = AtomicUsize::new(0);
+    let n_targets = targets.len();
+
+    let total_start = Instant::now();
+    let file_results: Vec<(String, Result<Vec<BandFitOutput>, String>)> = targets
+        .par_iter()
+        .map(|t| {
+            let result = process_file(
+                t, output_dir, do_plot, svi_lr, svi_n_steps, svi_n_samples,
+                retry_enabled, force_model, snr_threshold, profile_t0,
+            );
+            let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
+            if verbose {
+                eprint!("\r[{}/{}] {}", done, n_targets, t);
+            }
+            (t.clone(), result.map_err(|e| e.to_string()))
+        })
+        .collect();
+
+    let total_elapsed = total_start.elapsed().as_secs_f64();
+    if verbose {
+        eprintln!();
+    }
+
     let mut all_results: Vec<BandFitOutput> = Vec::new();
     let mut n_success = 0usize;
     let mut n_bands_total = 0usize;
     let mut total_pso_time = 0.0f64;
     let mut total_svi_time = 0.0f64;
 
-    let total_start = Instant::now();
-    for (idx, t) in targets.iter().enumerate() {
-        if verbose {
-            eprint!("\r[{}/{}] {}", idx + 1, targets.len(), t);
-        }
-        match process_file(t, output_dir, do_plot, svi_lr, svi_n_steps, svi_n_samples, retry_enabled, force_model) {
+    for (t, result) in file_results {
+        match result {
             Ok(band_results) => {
                 if !band_results.is_empty() {
                     n_success += 1;
@@ -2089,14 +2294,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => {
                 if verbose {
-                    eprintln!("\nError processing {}: {}", t, e);
+                    eprintln!("Error processing {}: {}", t, e);
                 }
             }
         }
-    }
-    let total_elapsed = total_start.elapsed().as_secs_f64();
-    if verbose {
-        eprintln!();
     }
 
     // Write global CSV
